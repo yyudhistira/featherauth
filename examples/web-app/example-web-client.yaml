@@ -1,0 +1,15 @@
+# The client entry of the example web app (examples/web-app).
+#
+# To add it: copy the `example-web:` block below under `clients:` of the realm
+# file the quick start uses (do not paste the `clients:` line again if the file
+# has one), then reload the configuration: `docker compose kill -s HUP featherauth`,
+# or send SIGHUP to the process.
+#
+# `authority` in examples/web-app/public/config.json must name that realm's issuer.
+clients:
+  example-web:                                       # the example web app (examples/web-app); for trying it, not for production
+    name: Example web app
+    type: public                                     # a browser app cannot keep a secret; PKCE protects the code
+    redirect_uris: [http://127.0.0.1:5173/callback]  # loopback: plain http is allowed only on 127.0.0.1 or [::1], never localhost (FR-32)
+    post_logout_redirect_uris: [http://127.0.0.1:5173/]
+    web_origins: [http://127.0.0.1:5173]             # the app calls token, userinfo, JWKS and discovery from the browser

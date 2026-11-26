@@ -1,0 +1,24 @@
+# Copy of the structure of an existing FeatherAuth deployment's server.yaml (the
+# options that differ from the defaults). Values are placeholders; the secret
+# files are not here: the test generates them with mode 0600.
+public_url: https://auth.example.com
+require_https: true
+
+trusted_proxies: ["172.17.0.1/32"]
+
+urls:
+  path_prefix: /auth
+  issuer: "{prefix}/realms/{realm}"
+  endpoints:
+    authorize: "{prefix}/realms/{realm}/protocol/openid-connect/auth"
+    token: "{prefix}/realms/{realm}/protocol/openid-connect/token"
+    userinfo: "{prefix}/realms/{realm}/protocol/openid-connect/userinfo"
+    jwks: "{prefix}/realms/{realm}/protocol/openid-connect/certs"
+    logout: "{prefix}/realms/{realm}/protocol/openid-connect/logout"
+    callback: "{prefix}/realms/{realm}/broker/{provider}/endpoint"
+
+login:
+  provider_hint_params: [provider, kc_idp_hint]
+
+logout:
+  redirect_params: [post_logout_redirect_uri, redirect_uri]

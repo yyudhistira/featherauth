@@ -1,0 +1,56 @@
+[
+  {
+    "test-name": "oidcc-server",
+    "variant": "*",
+    "configuration-filename": "*",
+    "current-block": "*",
+    "condition": "EnsureIdTokenDoesNotContainName",
+    "expected-result": "warning",
+    "comment": "user claims are in every ID token and scopes do not filter them (design: user_data.claims)"
+  },
+  {
+    "test-name": "oidcc-server",
+    "variant": "*",
+    "configuration-filename": "*",
+    "current-block": "*",
+    "condition": "EnsureIdTokenDoesNotContainNonRequestedClaims",
+    "expected-result": "warning",
+    "comment": "user claims are in every ID token and scopes do not filter them (design: user_data.claims)"
+  },
+  {
+    "test-name": "oidcc-claims-essential",
+    "variant": "*",
+    "configuration-filename": "*",
+    "current-block": "*",
+    "condition": "EnsureIdTokenDoesNotContainName",
+    "expected-result": "warning",
+    "comment": "user claims are in every ID token and scopes do not filter them (design: user_data.claims)"
+  },
+  {
+    "test-name": "oidcc-userinfo-post-body",
+    "variant": "*",
+    "configuration-filename": "*",
+    "current-block": "*",
+    "condition": "UserInfoEndpointWithAccessTokenInBodyNotSupported",
+    "expected-result": "warning",
+    "comment": "/userinfo takes the bearer token in the Authorization header only (FR-09); the form-body method of RFC 6750 section 2.2 is optional"
+  },
+  {
+    "test-name": "oidcc-ensure-request-with-acr-values-succeeds",
+    "variant": "*",
+    "configuration-filename": "*",
+    "current-block": "*",
+    "condition": "ValidateIdTokenACRClaimAgainstAcrValuesRequest",
+    "expected-result": "warning",
+    "comment": "acr_values is ignored without error and there is no acr claim (design: authorize request rules)"
+  },
+  {
+    "test-name": "oidcc-codereuse-30seconds",
+    "variant": "*",
+    "configuration-filename": "*",
+    "current-block": "*",
+    "condition": "EnsureHttpStatusCodeIs4xx",
+    "expected-result": "warning",
+    "comment": "a reused code revokes the session, not the access tokens already issued, which stay valid until they expire (SEC-14)"
+  }
+]

@@ -1,0 +1,5 @@
+# Entries not yet fully covered by a test (see CLAUDE.md, Traceability).
+# This list only shrinks; tools/trace fails when an entry here is already covered.
+# A requirement may be listed before an acceptance row names it; the row and the
+# test close the entry. Everything here is new in docs/REQUIREMENTS.md since
+# origin/main and leaves this list as its step lands.

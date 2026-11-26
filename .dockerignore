@@ -1,0 +1,18 @@
+# Keep the build context small and keep secrets out of it (and so out of the
+# image layers). Nothing excluded here is needed to build: the go:embed
+# directories (deploy/config.example, internal/web, internal/store/migrations)
+# stay in.
+.git
+cover.out
+docs
+deploy/ops
+deploy/config
+**/.env*
+**/*.pem
+**/*.p8
+**/*.key
+**/secrets
+**/*.db
+**/*.db-wal
+**/*.db-shm
+examples

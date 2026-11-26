@@ -1,0 +1,11 @@
+# TLS in front of FeatherAuth for the conformance run, with Caddy's internal CA.
+# The suite does not verify certificates of the server under test.
+{
+	local_certs
+	skip_install_trust
+}
+
+op.conformance.test {
+	tls internal
+	reverse_proxy featherauth:8080
+}

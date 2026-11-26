@@ -1,0 +1,25 @@
+# Translation file example: every message id with its English text.
+# Copy it to locales/<code>.yaml, translate the values, and list <code> in
+# login_page.supported_locales. An id that is missing shows in English.
+# {name} stands for the provider's name.
+chooser.log_in_with: "Log in with {name}"
+chooser.no_providers: "No sign-in method is available right now."
+chooser.prompt: "Choose how you want to sign in."
+chooser.sign_in_with: "Sign in with {name}"
+chooser.title: "Sign in"
+data_deletion.confirmed: "Deletion requests are carried out at once. Your confirmation code is"
+data_deletion.contact: "If you cannot do that, write to"
+data_deletion.in_app: "To delete your account and the data stored about you, use the delete-account option in the app."
+data_deletion.title: "Delete your data"
+error.contact: "If this keeps happening, contact"
+error.invalid_request: "The request is not valid, so you cannot be sent back to the app. Go back to the app and try again."
+error.logout_refused: "The sign-out request could not be verified."
+error.realm_disabled: "Sign-in is not available right now."
+error.request_expired: "This sign-in request is unknown or has expired. Go back to the app and try again."
+error.server: "Something went wrong on our side. Try again later."
+error.title: "Something went wrong"
+form_post.body: "You are being sent back to the app."
+form_post.button: "Continue"
+form_post.title: "Continue"
+signed_out.body: "You are signed out. You can close this window."
+signed_out.title: "Signed out"

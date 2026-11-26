@@ -1,0 +1,64 @@
+# Adds PostgreSQL to compose.yaml, for a database kept apart from the service
+# (and the database several instances share). Use it with compose.yaml:
+#
+#   docker compose -f compose.yaml -f compose.postgres.yaml up -d
+#
+# Before the first start, set database.yaml in the configuration directory to
+# driver: postgres, with postgres.host: postgres, postgres.password_file:
+# secrets/postgres_password and sslmode: disable. This container serves no TLS,
+# so the traffic stays on the compose network, which is the only place it is
+# reachable: no port is published. Write the password file (one line) in the
+# configuration directory with mode 0600, owned by uid 65532, the service's user,
+# so that uid 65532 can read it. The loader checks the mode bits only:
+# strict_permissions refuses any group or other bit, and does not look at the
+# owner. This file mounts the same file into the container, which reads it as
+# its password.
+#
+# compose.yaml's hardening settings stay on the featherauth service.
+services:
+  postgres:
+    # Pinned by version and digest; update both together.
+    image: postgres:18@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
+    restart: unless-stopped
+    # Hardening (SEC-44), as far as the image allows. The entrypoint starts as
+    # root, reads the password file (DAC_OVERRIDE), takes ownership of the data
+    # and socket directories (CHOWN) and drops to the postgres user (SETUID,
+    # SETGID). deploy/ops/check-postgres.sh proves that removing any one of
+    # them stops the container. Writable: the data volume and the tmpfs
+    # at /var/run/postgresql (no /tmp: Postgres writes its temporary files under
+    # its data directory).
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/run/postgresql
+    environment:
+      POSTGRES_USER: featherauth
+      POSTGRES_DB: featherauth
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    healthcheck:
+      # Over TCP: the image's first start answers on its socket alone while it
+      # initializes, and the service must not start before TCP answers.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U featherauth -d featherauth"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ${FEATHERAUTH_CONFIG:-./config}/secrets/postgres_password:/run/secrets/postgres_password:ro
+
+  featherauth:
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

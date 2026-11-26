@@ -1,0 +1,12 @@
+# Statement coverage thresholds per package (CLAUDE.md, Coverage).
+# "<pattern> <percent>" or "<pattern> skip"; "/..." matches a package and
+# everything below it; the most specific pattern wins. Packages outside
+# internal/ and test-support packages are not checked.
+
+internal/... 90
+
+internal/token/... 95
+internal/oidc/... 95
+internal/config/... 95
+internal/user/... 95
+internal/secure/... 95

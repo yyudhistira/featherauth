@@ -1,0 +1,84 @@
+# OpenID conformance suite (release-v5.3.4, pinned by digest), FeatherAuth behind
+# Caddy with an internal CA, and the runner that drives the test plans.
+# The mock identity provider is not here: the Go test (deploy/conformance_test.go,
+# build tag conformance) runs it on the host, because it is test support code, and
+# the containers reach it as host.docker.internal.
+#
+# Variables, all set by the Go test: CONFORMANCE_CONFIG (host directory with
+# FeatherAuth's configuration), CONFORMANCE_OUT (host directory with the plan
+# configuration and for the results).
+#
+#   go test -tags conformance -count=1 -timeout 90m ./deploy/    (make conformance)
+name: featherauth-conformance
+services:
+  mongodb:
+    image: mongo:6.0.13@sha256:b415b12f638e2685d06c58ab7fb5943577c50fadec6d9340ef67d21aeac72070
+  nginx:
+    image: registry.gitlab.com/openid/conformance-suite/nginx:release-v5.3.4@sha256:9a7850826fcc8690cd43373528f50e9551ba33bf8e4a40b67b13267b0aca3675
+    depends_on:
+      - server
+    networks:
+      default:
+        aliases:
+          # the suite's own requests to its public host name reach nginx
+          - localhost.emobix.co.uk
+  server:
+    image: registry.gitlab.com/openid/conformance-suite:release-v5.3.4@sha256:dcc4bd1fb7e9c00f048a67373fe2bec5ecf9feb45a6b5d55e237e5c30e5312c6
+    environment:
+      BASE_URL: https://localhost.emobix.co.uk:8443
+      BASE_MTLS_URL: https://localhost.emobix.co.uk:8444
+      MONGODB_HOST: mongodb
+      SPRING_PROFILES_ACTIVE: dev
+      OIDC_GOOGLE_CLIENTID: unused
+      OIDC_GOOGLE_SECRET: unused
+      OIDC_GITLAB_CLIENTID: unused
+      OIDC_GITLAB_SECRET: unused
+    depends_on:
+      - mongodb
+    extra_hosts:
+      # the suite's browser follows the redirect to the mock identity provider
+      - "host.docker.internal:host-gateway"
+  featherauth:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    environment:
+      FEATHERAUTH_CONFIG_DIR: /etc/featherauth
+    volumes:
+      - ${CONFORMANCE_CONFIG:?}:/etc/featherauth:ro
+      - data:/var/lib/featherauth
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  proxy:
+    image: caddy:2.11.9@sha256:9c1b76fb701c1f77383d3124d9f626e38bcf83bc1255ed47475d4f2420701d03
+    depends_on:
+      featherauth:
+        condition: service_healthy
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      default:
+        aliases:
+          - op.conformance.test
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    profiles: [run]
+    depends_on:
+      - nginx
+      - proxy
+    environment:
+      CONFORMANCE_SERVER: https://localhost.emobix.co.uk:8443/
+      CONFORMANCE_SERVER_MTLS: https://localhost.emobix.co.uk:8444/
+      CONFORMANCE_DEV_MODE: "1"
+      CONFORMANCE_PLANS: ${CONFORMANCE_PLANS:-basic config logout}
+    volumes:
+      - ${CONFORMANCE_OUT:?}:/out
+      - ./run-plans.sh:/run-plans.sh:ro
+      - ./dump-logs.py:/dump-logs.py:ro
+      - ./expected:/expected:ro
+    entrypoint: ["sh", "/run-plans.sh"]
+
+volumes:
+  data:

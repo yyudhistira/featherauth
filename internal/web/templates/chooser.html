@@ -1,0 +1,16 @@
+{{define "content" -}}
+{{with .LogoURL}}<img class="logo" src="{{.}}" alt="">
+{{end -}}
+<h1>{{.T "chooser.title"}}</h1>
+<p class="realm">{{.RealmName}}</p>
+{{if .Providers -}}
+<p>{{.T "chooser.prompt"}}</p>
+<ul class="providers">
+{{range .Providers -}}
+<li><a class="button {{.Class}}" href="{{.Href}}">{{if .Logo}}<img src="{{$.AssetsPath}}/logos/{{.LogoFile}}" alt="">{{end}}<span>{{if eq .Logo "facebook"}}{{$.LogInWith .Name}}{{else}}{{$.SignInWith .Name}}{{end}}</span></a></li>
+{{end -}}
+</ul>
+{{else -}}
+<p>{{.T "chooser.no_providers"}}</p>
+{{end -}}
+{{end}}

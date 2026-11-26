@@ -1,0 +1,21 @@
+{{define "form_post" -}}
+<!DOCTYPE html>
+<html lang="{{.Lang}}">
+<head>
+<meta charset="utf-8">
+<title>{{.T "form_post.title"}}</title>
+</head>
+<body>
+<form method="post" action="{{.Action}}">
+{{range .Fields -}}
+<input type="hidden" name="{{.Name}}" value="{{.Value}}">
+{{end -}}
+<noscript>
+<p>{{.T "form_post.body"}}</p>
+<button type="submit">{{.T "form_post.button"}}</button>
+</noscript>
+</form>
+{{.Script}}
+</body>
+</html>
+{{end}}

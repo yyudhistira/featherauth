@@ -1,0 +1,44 @@
+[
+  {
+    "test-name": "oidcc-scope-profile",
+    "variant": "*",
+    "configuration-filename": "*",
+    "comment": "scopes_supported is [openid] only: scopes do not filter claims (design: Discovery document, user_data.claims)"
+  },
+  {
+    "test-name": "oidcc-scope-email",
+    "variant": "*",
+    "configuration-filename": "*",
+    "comment": "scopes_supported is [openid] only: scopes do not filter claims (design: Discovery document, user_data.claims)"
+  },
+  {
+    "test-name": "oidcc-scope-address",
+    "variant": "*",
+    "configuration-filename": "*",
+    "comment": "scopes_supported is [openid] only: scopes do not filter claims (design: Discovery document, user_data.claims)"
+  },
+  {
+    "test-name": "oidcc-scope-phone",
+    "variant": "*",
+    "configuration-filename": "*",
+    "comment": "scopes_supported is [openid] only: scopes do not filter claims (design: Discovery document, user_data.claims)"
+  },
+  {
+    "test-name": "oidcc-scope-all",
+    "variant": "*",
+    "configuration-filename": "*",
+    "comment": "scopes_supported is [openid] only: scopes do not filter claims (design: Discovery document, user_data.claims)"
+  },
+  {
+    "test-name": "oidcc-alternate-happy-flow",
+    "variant": "*",
+    "configuration-filename": "*",
+    "comment": "scopes_supported is [openid] only: scopes do not filter claims (design: Discovery document, user_data.claims)"
+  },
+  {
+    "test-name": "oidcc-unsigned-request-object-supported-correctly-or-rejected-as-unsupported",
+    "variant": "*",
+    "configuration-filename": "*",
+    "comment": "request objects are not supported (the authorize endpoint answers request_not_supported, which the OpenID Connect specification permits)"
+  }
+]

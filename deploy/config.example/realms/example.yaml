@@ -1,0 +1,348 @@
+# FeatherAuth realm file: realms/<name>.yaml. One realm is one set of users,
+# keys, providers and clients; the file name must equal "name". Every option
+# is listed with its default value, except the placeholders (the realm name,
+# key and secret file paths, provider credentials and URLs, client names and
+# redirect URIs), which you replace. Durations use Go syntax (30s, 15m, 720h)
+# and must be greater than zero unless noted. Paths of secret files are
+# relative to the config directory. All providers below are disabled; enable
+# one and fill in its credentials.
+
+# Realm name, the {realm} URL segment. Required. Lowercase letters, digits and
+# dashes; admin, healthz and readyz are reserved. Cannot change once users exist.
+name: example
+
+# Shown on the login page. Plain text. Default: the name.
+display_name: Example
+
+# false refuses all logins and refreshes; discovery and the JWKS stay available.
+enabled: true
+
+# Token lifetimes and formats.
+tokens:
+  # Validity of access and ID tokens. 1 minute or more.
+  access_token_lifetime: 15m
+  # The session ends if the refresh token is unused this long.
+  refresh_idle_lifetime: 720h
+  # Absolute session limit counted from login. 0 for no limit.
+  session_max_lifetime: 2160h
+  # Validity of the one-time login code, 10 to 300 seconds.
+  code_lifetime: 60s
+  # How long a user may take at the provider before the attempt expires.
+  login_timeout: 10m
+  # A just-rotated refresh token still works in this window, to survive a lost
+  # response. 0 disables.
+  refresh_reuse_grace: 30s
+  # Rotation for confidential clients: true rotates on every use with reuse
+  # detection; false returns the same token (weaker). Public clients always rotate.
+  refresh_token_rotation: true
+  # How recent the login behind an access token must be for DELETE /account.
+  account_delete_max_auth_age: 10m
+  # Signing algorithm of access tokens and JWT refresh tokens: RS256 or ES256.
+  # ID tokens are always RS256.
+  algorithm: RS256
+  # Wire format of the refresh token: opaque, or jwt for clients that decode it.
+  refresh_token_format: opaque
+
+# Single sign-on session (FR-45): a login at a client with sso: true leaves a browser
+# session, so a later login from the same browser can skip the provider.
+sso:
+  # Whether the single sign-on session is on. false by default.
+  enabled: false
+  # The browser session ends if it is unused this long. Greater than zero.
+  idle_lifetime: 8h
+  # The browser session ends this long after the login that made it. Greater than zero.
+  max_lifetime: 720h
+
+# Signing keys, all published in the JWKS. At least one is required. Create a
+# key with "featherauth keys generate <file>".
+keys:
+  # Key id in every token header; unique across realms. Required.
+  - kid: example-2026-10
+    # PEM private key: RSA of 2048 bits or more, or EC P-256. Required.
+    file: secrets/example/signing-2026-10.pem
+    # active signs new tokens (exactly one RSA key always; with algorithm
+    # ES256 exactly one EC key too). verify_only is only published, for
+    # rotation. Required.
+    state: active
+
+# What is stored and emitted about a user.
+user_data:
+  # What is stored about a user; any of email, name.
+  attributes: [email, name]
+  # Claims in ID tokens and /userinfo, and in access tokens unless
+  # access_token_claims is set: any of name, email, email_verified,
+  # preferred_username, allowed-origins. Only stored attributes can be emitted.
+  claims: [name, email, email_verified, preferred_username]
+  # User claims in access tokens: names from claims above, a subset of them.
+  # Leave the option out to put the claims above in access tokens; [] puts no
+  # user claim in them. The ID token and /userinfo keep claims.
+  access_token_claims: [name, email, email_verified, preferred_username]
+  # Never overwrite a stored name with an empty value (Apple sends the name once).
+  keep_name_if_missing: true
+  # Format of the id (the sub) of every user created in this realm, at a first
+  # login and for an import row without an id: uuid (a random version 4 UUID,
+  # which an API storing the id in a UUID type accepts) or ulid (26 characters
+  # that sort by creation time). Applies to users created after a change; ids
+  # never change, so a realm can hold both.
+  id_format: uuid
+  # Email domains on which auto-link may join identities: domains that never
+  # give an address to another person. Add a company domain only if you accept
+  # that a reassigned address joins its new owner to the old account.
+  auto_link_domains: [gmail.com, googlemail.com, icloud.com, me.com, mac.com]
+
+# The provider chooser and the error pages.
+login_page:
+  # Logo shown on the provider chooser: empty or an https URL.
+  logo_url: ""
+  # Color of links and of generic-provider buttons: a CSS hex color.
+  accent_color: "#2563eb"
+  # Email address or https URL shown on the data-deletion and error pages.
+  # Required when Facebook is enabled.
+  contact: ""
+  # Order of the provider buttons; providers not listed follow.
+  provider_order: [google, apple, github, facebook]
+  # Language when the browser language is not supported.
+  default_locale: en
+  # Languages of the chooser and error pages. English is built in; add a
+  # translation file locales/<code>.yaml and list its code here.
+  supported_locales: [en]
+
+# Headers of browser pages.
+security_headers:
+  # Content-Security-Policy header on browser pages. Empty omits it.
+  content_security_policy: "default-src 'none'; style-src 'self'; img-src 'self' https:; frame-ancestors 'none'; form-action 'self'"
+  # Strict-Transport-Security header; effective over HTTPS only. Empty omits it.
+  hsts: "max-age=31536000; includeSubDomains"
+
+# Providers, by key. The key is the {provider} URL segment; "type" says which
+# adapter to use and defaults to the key. Options marked "only" belong to one
+# adapter type and are rejected on the others.
+providers:
+  # Google sign-in.
+  google:
+    # Adapter: google, apple, github, facebook or oidc. Default: the key.
+    type: google
+    # Turns the provider on. Default false.
+    enabled: false
+    # Button text. Default: Google for the google adapter, Apple, GitHub or
+    # Facebook for those adapters, the key for oidc.
+    display_name: Google
+    # true shows no button on the chooser, but the provider hint still works.
+    hidden: false
+    # OAuth client id at the provider. Required when enabled.
+    client_id: 1234.apps.googleusercontent.com
+    # File holding the client secret. Required when enabled (not for Apple).
+    client_secret_file: secrets/example/client_secret
+    # Scopes requested from the provider.
+    scopes: [openid, email, profile]
+    # Believe the provider's verified-email flag; false treats the email as unverified.
+    trust_email: true
+    # Link to an existing user with the same verified email on an auto-link
+    # domain. Has effect only with trust_email: true.
+    auto_link: true
+    # import copies name and email at first login; force refreshes them at every login.
+    sync_mode: import
+    # Time allowed for each call to the provider; at most 30s.
+    timeout: 10s
+    # Google only: restrict login to one Workspace domain. Empty for any.
+    hosted_domain: ""
+    # Override the endpoints of Google's OpenID Connect and events.
+    endpoints:
+      # Google only: the RISC configuration document, which names the keys and
+      # issuer of security event tokens. Empty for Google's own URL.
+      risc_configuration: ""
+
+  # Sign in with Apple.
+  apple:
+    # Adapter type.
+    type: apple
+    # Turns the provider on.
+    enabled: false
+    # Button text.
+    display_name: Apple
+    # No button on the chooser.
+    hidden: false
+    # Apple only: the Services ID (not the app bundle id). Required.
+    client_id: com.example.signin
+    # Not used by Apple: the client secret is generated from private_key_file.
+    # Left empty.
+    client_secret_file: ""
+    # Scopes requested (the name only arrives on the first login).
+    scopes: [name, email]
+    # Apple states email_verified.
+    trust_email: true
+    # Link to an existing user with the same verified email on an auto-link domain.
+    auto_link: true
+    # import or force.
+    sync_mode: import
+    # Time allowed for each call to Apple; at most 30s.
+    timeout: 10s
+    # Apple only: Team id. Required.
+    team_id: ABCDE12345
+    # Apple only: Sign in with Apple key id. Required.
+    key_id: ABC123DEFG
+    # Apple only: the .p8 key; the client secret JWT is generated from it.
+    private_key_file: secrets/example/apple_key.p8
+    # Apple only: lifetime of each generated client secret, up to 6 months.
+    client_secret_lifetime: 5m
+    # Apple only: keep Apple's refresh token, encrypted with
+    # secrets.encryption_key_files, so account deletion can revoke it at Apple.
+    store_refresh_token: true
+    # Apple only: aud values accepted on Apple's server-to-server notifications
+    # besides client_id (for example the primary App ID).
+    notification_audiences: []
+
+  # GitHub sign-in.
+  github:
+    # Adapter type.
+    type: github
+    # Turns the provider on.
+    enabled: false
+    # Button text.
+    display_name: GitHub
+    # No button on the chooser.
+    hidden: false
+    # OAuth client id at GitHub.
+    client_id: Iv1.0123456789abcdef
+    # File holding the client secret.
+    client_secret_file: secrets/example/client_secret
+    # Requested scopes; user:email is needed to read the email list.
+    scopes: [read:user, user:email]
+    # GitHub reports verification per address.
+    trust_email: true
+    # Link to an existing user with the same verified email on an auto-link domain.
+    auto_link: true
+    # import or force.
+    sync_mode: import
+    # Time allowed for each call to GitHub; at most 30s.
+    timeout: 10s
+    # GitHub only: send an S256 code challenge to GitHub.
+    pkce: true
+    # GitHub only: false allows existing GitHub accounts only.
+    allow_signup: true
+    # GitHub only: refuse login if GitHub has no verified email.
+    require_verified_email: true
+
+  # Facebook login.
+  facebook:
+    # Adapter type.
+    type: facebook
+    # Turns the provider on. Needs login_page.contact.
+    enabled: false
+    # Button text.
+    display_name: Facebook
+    # No button on the chooser.
+    hidden: false
+    # App id at Facebook.
+    client_id: "1234567890"
+    # File holding the app secret. It also verifies the signed_request of
+    # Meta's data-deletion callback.
+    client_secret_file: secrets/example/client_secret
+    # Requested permissions.
+    scopes: [public_profile, email]
+    # Facebook gives no verified flag, so emails are never trusted.
+    trust_email: false
+    # Link to an existing user with the same verified email on an auto-link domain.
+    auto_link: true
+    # import or force.
+    sync_mode: import
+    # Time allowed for each call to Facebook; at most 30s.
+    timeout: 10s
+    # Facebook only: Graph API version in URLs; check yearly, Meta retires old versions.
+    graph_version: v26.0
+    # Facebook only: oauth is the only supported flow.
+    flow: oauth
+    # Facebook only: fields requested from /me.
+    fields: [id, name, email]
+    # Facebook only: refuse login if Facebook returns no email.
+    require_email: false
+
+  # Any other OpenID Connect provider with a single issuer.
+  oidc:
+    # Adapter type: oidc defines any other single-issuer provider from config.
+    type: oidc
+    # Turns the provider on.
+    enabled: false
+    # Button text.
+    display_name: Example SSO
+    # No button on the chooser.
+    hidden: false
+    # OAuth client id at the provider.
+    client_id: featherauth
+    # File holding the client secret.
+    client_secret_file: secrets/example/client_secret
+    # Requested scopes.
+    scopes: [openid, email, profile]
+    # Believe the provider's email_verified claim; a missing claim is unverified.
+    trust_email: false
+    # Link to an existing user with the same verified email on an auto-link domain.
+    auto_link: true
+    # import or force.
+    sync_mode: import
+    # Time allowed for each call to the provider; at most 30s.
+    timeout: 10s
+    # oidc only: issuer URL of a single issuer; discovery is derived from it.
+    issuer: https://sso.example.com
+    # Override the provider's own endpoints. Remove this block to use the
+    # endpoints found by discovery; authorize and token apply to every provider.
+    endpoints:
+      # Override the authorization URL.
+      authorize: https://sso.example.com/oauth2/authorize
+      # Override the token URL.
+      token: https://sso.example.com/oauth2/token
+      # Override the user-info URL; it is called only when set.
+      userinfo: https://sso.example.com/oauth2/userinfo
+      # Override the JWKS URL (Google, Apple and oidc only).
+      jwks: https://sso.example.com/oauth2/jwks
+
+# Clients: the apps allowed to sign users in, by client id.
+clients:
+  # A public client: a browser app without a secret.
+  web:
+    # Display name for humans and logs. Default: the client id.
+    name: Web app
+    # Free-text note.
+    description: A single-page app
+    # public has no secret and needs PKCE; confidential authenticates with a secret.
+    type: public
+    # File holding the secret. Required for confidential clients; a public
+    # client has none, so it is left empty. A secret shorter than 32 characters
+    # is a warning at load and in config check.
+    client_secret_file: ""
+    # Allowed redirect URIs, exact match, no wildcards. Required.
+    redirect_uris: [https://app.example.com/callback]
+    # Allowed return URLs after logout; empty means the same as redirect_uris.
+    post_logout_redirect_uris: []
+    # Origins allowed to call token, userinfo, JWKS and discovery from a
+    # browser (CORS): scheme, host and optional port only. Empty for native apps.
+    web_origins: [https://app.example.com]
+    # false is an explicit exception for a client that cannot send a PKCE challenge.
+    require_pkce: true
+    # How the result is returned when the request names none: query, fragment or form_post.
+    response_mode: query
+    # Value of the aud claim in access tokens. Default: the client id.
+    audience: web
+    # Per-client override of the realm value.
+    access_token_lifetime: 15m
+    # Per-client override of the realm value.
+    refresh_idle_lifetime: 720h
+    # Per-client override of the realm value; 0 for no limit.
+    session_max_lifetime: 2160h
+    # Confidential clients only (a public client always rotates); override of the realm value.
+    refresh_token_rotation: true
+    # Whether this client's access tokens may call DELETE /account.
+    allow_account_delete: false
+    # Whether this client's access tokens may sign the user out of every session
+    # (all_sessions=true at the logout path).
+    allow_session_management: false
+    # Where the back-channel logout tokens of this client's sessions are posted: an
+    # https URL with a host and no fragment (http only with require_https: false).
+    # Empty: no notifications are sent.
+    backchannel_logout_uri: ""
+    # Whether the tokens are bound to the key of a DPoP proof (RFC 9449): off ignores the
+    # DPoP header, allowed binds them when a proof is sent, required refuses a token
+    # request without one. A bound refresh token needs its key whatever this says.
+    dpop: off
+    # Whether the client takes part in the realm's single sign-on session. false keeps its
+    # logins out of it: they leave no browser session.
+    sso: true

@@ -1,0 +1,38 @@
+# Caddyfile.example: FeatherAuth behind Caddy with a Let's Encrypt certificate
+# (automatic; Caddy also redirects HTTP to HTTPS). Replace auth.example.com
+# with the host name of public_url, and keep Caddy's data directory on a
+# persistent volume.
+#
+# Paid certificate: remove the "#" in front of the tls line below and point it
+# at your files; reload Caddy after replacing them.
+#
+# Upstream address:
+# - Caddy on the host, FeatherAuth in Docker (compose.yaml): 127.0.0.1:8080,
+#   as below. Put the Docker network's gateway range in trusted_proxies in
+#   server.yaml (the proxy reaches the container from the gateway address).
+# - Caddy from compose.caddy.yaml: copy this file to Caddyfile next to the
+#   compose files and change the upstream to featherauth:8080. Put the range of
+#   the compose network in trusted_proxies in server.yaml. Leave Caddy's admin
+#   API enabled (do not add "admin off"): the container's health check uses it
+#   on 127.0.0.1:2019.
+#
+# Caddy forwards Host and sets X-Forwarded-For and X-Forwarded-Proto by itself.
+# Caddy writes no access log unless a log directive is added. If you add one,
+# make it drop the query string (codes, state and id_token_hint travel in it);
+# the default log format records the whole URI.
+auth.example.com {
+    # tls /etc/ssl/auth/fullchain.pem /etc/ssl/auth/privkey.pem
+    # Upstream with compose.caddy.yaml (see above): use this line instead.
+    # reverse_proxy featherauth:8080 {
+    reverse_proxy 127.0.0.1:8080 {
+        # Hold requests for up to 10 seconds while FeatherAuth restarts.
+        lb_try_duration 10s
+        lb_try_interval 250ms
+        # A new connection to FeatherAuth for every request, none kept idle:
+        # a request never meets a connection that a restarting FeatherAuth is
+        # closing, which Caddy would answer 502 for a POST instead of holding.
+        transport http {
+            keepalive off
+        }
+    }
+}

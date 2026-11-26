@@ -1,0 +1,9 @@
+# The paths of each conditional release check, one line per check: its name,
+# then its paths. deploy/ops/release-check.sh and TestNoChangeClaims read this
+# file; docs/RELEASING.md names it and does not repeat it. A path is a git pathspec.
+conformance internal cmd go.mod go.sum deploy/conformance deploy/Dockerfile
+load internal cmd go.mod go.sum deploy/Dockerfile deploy/load deploy/load*_test.go
+browser internal/web internal/oidc internal/server internal/config
+apple internal/provider internal/oidc internal/store go.mod go.sum
+tls deploy/Caddyfile.example deploy/nginx.example.conf deploy/compose.caddy.yaml deploy/compose.tls.yaml deploy/compose.yaml deploy/Caddyfile.ha
+workflow .github/workflows deploy/ops/tested-tree.sh deploy/ops/changed-files.sh deploy/ops/deploy-remote.sh deploy/compose.yaml

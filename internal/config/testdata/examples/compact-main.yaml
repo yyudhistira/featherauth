@@ -1,0 +1,20 @@
+# /etc/featherauth/realms/main.yaml
+name: main
+tokens:
+  algorithm: RS256
+keys:
+  - { kid: main-2026-10, file: secrets/main/signing-2026-10.pem, state: active }
+providers:
+  google:
+    enabled: true
+    client_id: 1234.apps.googleusercontent.com
+    client_secret_file: secrets/main/google_client_secret
+clients:
+  web:
+    redirect_uris: [https://app.example.com/callback]
+    web_origins: [https://app.example.com]
+  mobile:
+    redirect_uris: [com.example.app:/callback]
+    refresh_idle_lifetime: 17520h   # stay signed in for 2 years of inactivity
+    session_max_lifetime: 0
+    allow_account_delete: true      # the app offers "Delete account"

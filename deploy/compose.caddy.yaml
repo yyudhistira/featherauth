@@ -1,0 +1,35 @@
+# Adds Caddy in front of FeatherAuth, for a host without a proxy. Use it with
+# compose.yaml:
+#
+#   docker compose -f compose.yaml -f compose.caddy.yaml up -d
+#
+# Copy Caddyfile.example to Caddyfile next to this file and edit it. Inside
+# this compose network Caddy reaches the service as featherauth:8080, and
+# trusted_proxies in server.yaml must list this network's range.
+services:
+  caddy:
+    # Pinned by version and digest; update both together.
+    image: caddy:2.11.9@sha256:9c1b76fb701c1f77383d3124d9f626e38bcf83bc1255ed47475d4f2420701d03
+    restart: unless-stopped
+    depends_on:
+      featherauth:
+        condition: service_healthy
+    healthcheck:
+      # Caddy's admin API, on its default address inside the container.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates: keep on a persistent volume.
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

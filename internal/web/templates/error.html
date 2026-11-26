@@ -1,0 +1,6 @@
+{{define "content" -}}
+<h1>{{.T "error.title"}}</h1>
+<p>{{.Message}}</p>
+{{with .Contact}}<p class="contact">{{$.T "error.contact"}} <a href="{{.Href}}">{{.Text}}</a></p>
+{{end -}}
+{{end}}

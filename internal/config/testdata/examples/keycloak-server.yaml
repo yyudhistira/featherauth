@@ -1,0 +1,18 @@
+public_url: https://auth.example.com   # Keycloak host
+require_https: true
+# secrets.encryption_key_files keeps its default, [secrets/encryption_key]. Apple's store_refresh_token
+# (default true) needs that file: create it with `featherauth keys generate --type encryption secrets/encryption_key`.
+urls:
+  path_prefix: /auth
+  issuer: "{prefix}/realms/{realm}"     # discovery is then at .../auth/realms/main/.well-known/openid-configuration
+  endpoints:
+    authorize: "{prefix}/realms/{realm}/protocol/openid-connect/auth"
+    token: "{prefix}/realms/{realm}/protocol/openid-connect/token"
+    userinfo: "{prefix}/realms/{realm}/protocol/openid-connect/userinfo"
+    jwks: "{prefix}/realms/{realm}/protocol/openid-connect/certs"
+    logout: "{prefix}/realms/{realm}/protocol/openid-connect/logout"
+    callback: "{prefix}/realms/{realm}/broker/{provider}/endpoint"
+login:
+  provider_hint_params: [provider, kc_idp_hint]
+logout:
+  redirect_params: [post_logout_redirect_uri, redirect_uri]

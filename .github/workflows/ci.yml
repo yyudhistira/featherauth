@@ -1,0 +1,197 @@
+name: ci
+
+# Pull requests, and deploy.yml, which calls this workflow so that a deploy runs
+# the same checks (deploy.yml may skip them, see its header).
+on:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels that pull request's older running ci run.
+# The group has the event name in it, so a pull request number and a run id never
+# share a group. When deploy.yml calls this workflow, github.event_name is the
+# caller's event (push or tag), so nothing is cancelled, and the group is
+# per run and is not the "deploy" group. Observed on a real run on 2026-11-13
+# (docs/DESIGN.md, the row Repeated checks): a second push cancelled the
+# first run of its pull request and no other run, and no run of deploy.yml.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Decides whether the pull request changes documentation only, or only
+  # comments of Go files: the rules are in deploy/ops/changed-files.sh,
+  # which compares the base and the head commit of the event. docs_only skips all
+  # the test jobs. slow_skip is true for those changes and also for a change of
+  # tools/trace/pending.txt (with documentation files at most): it skips browser,
+  # ops and postgres only, check still runs (make trace reads that file). Any
+  # other event (a push, a call from deploy.yml) says false for both without
+  # calling gh, so the tests always run there.
+  # pull-requests: read lets the script list the files of the pull request.
+  changes:
+    runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.changes.outputs.docs_only }}
+      slow_skip: ${{ steps.changes.outputs.slow_skip }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Decide whether only documentation changed
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            sh deploy/ops/changed-files.sh "$REPO" compare "$BASE" "$HEAD"
+          else
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "slow_skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The scan for private keys in tracked files (the one TestRepositoryHoldsNoSecretFiles
+  # runs). It runs on every run, also when the tests are skipped for a
+  # documentation-only change: it is cheap and reads those files.
+  scan:
+    runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Look for private keys in tracked files
+        run: |
+          if git grep -lE '^-----BEGIN [ABCDEFGHIJKLMNOPQRSTUVWXYZ ]*PRIVATE KEY-----$'; then
+            echo "a tracked file holds a private key" >&2
+            exit 1
+          fi
+
+  # Skipped when the change is documentation-only or comment-only. !cancelled()
+  # keeps the implicit success() out, so a failed changes job runs the tests
+  # instead of skipping them: only docs_only exactly true skips.
+  # Format, vet, staticcheck, race tests, coverage, trace, arch and govulncheck.
+  check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+    runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tools/trace compares pending.txt with origin/main
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make check
+
+  # Chromedp tests (build tag browser); the runner has Chrome. Skipped also when
+  # slow_skip is true (a change of tools/trace/pending.txt only).
+  browser:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.slow_skip != 'true' }}
+    runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Node builds the example web app that the browser test serves (make example).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: examples/web-app/.node-version
+      - run: make browser
+
+  # Image build and the checks of the image, the proxy examples and the
+  # off-server backup (build tag ops). On Linux the test fails when the network
+  # probe is skipped, so the "port is not reachable from another host" check runs.
+  # Skipped also when slow_skip is true.
+  ops:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.slow_skip != 'true' }}
+    runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the upgrade tests build the newest release tag
+          fetch-tags: true
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make ops
+
+  # Postgres tests (build tag postgres): make postgres starts a container of the
+  # matrix version on the runner's docker, runs the tests against it and removes
+  # it. Postgres 15 is the oldest supported version and 18 the newest stable major
+  # as of 2026-11-15: bump 18 (and the default in the Makefile) when a newer major
+  # ships.
+  # Skipped also when slow_skip is true, as the ops job is.
+  postgres:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.slow_skip != 'true' }}
+    runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ['15', '18']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Postgres tests on the matrix version
+        env:
+          POSTGRES_VERSION: ${{ matrix.postgres }}
+        run: make postgres POSTGRES_VERSION="$POSTGRES_VERSION"
+
+  # After a green pull request run, records the git tree it tested as the commit
+  # status ci/tested-tree on the head commit of the pull request. deploy.yml
+  # reads it (deploy/ops/tested-tree.sh) to skip the same checks on the merge
+  # to main. It is an optimisation: a failure (for example the read-only token
+  # of a fork) must not fail the run, so the step has continue-on-error. It does
+  # not run when deploy.yml calls this workflow (the event is push there). It
+  # needs every job and has no status function, so a skipped job (documentation-
+  # only, comment-only, or browser, ops and postgres skipped for pending.txt)
+  # skips it: no tree is recorded for a change that was not tested in full.
+  record-tested-tree:
+    needs: [changes, scan, check, browser, ops, postgres]
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      # Pinned to the commit of this run (the pull request merged into its
+      # base, as the test jobs saw it), not to whatever the merge ref is later.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record the tested tree
+        continue-on-error: true
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "$SHA" ]; then
+            echo "the checkout is not the commit of this run; no status posted" >&2
+            exit 0
+          fi
+          tree=$(git rev-parse "HEAD^{tree}")
+          gh api "repos/$REPO/statuses/$HEAD_SHA" -f state=success -f context=ci/tested-tree -f description="$tree"

@@ -1,0 +1,57 @@
+# FeatherAuth database.yaml: the database. Read at startup only; a change
+# needs a restart.
+
+# Database backend: sqlite or postgres.
+driver: sqlite
+
+# SQLite settings (driver: sqlite).
+sqlite:
+  # Database file, on the mounted data volume.
+  path: /var/lib/featherauth/featherauth.db
+  # How long a writer waits for the lock before failing. Greater than zero.
+  busy_timeout: 5s
+  # Journal mode: wal allows reads during writes (others only for filesystems
+  # that cannot support it).
+  journal_mode: wal
+  # Read connections in the pool, 1 or more. All writes go through one
+  # separate write connection.
+  read_connections: 4
+
+# Used only with driver: postgres.
+postgres:
+  # Server host. Required with driver: postgres.
+  host: db.example.com
+  # Server port.
+  port: 5432
+  # Time allowed to open one connection (TCP, TLS and login); a server that
+  # does not answer fails within it. Greater than zero.
+  connect_timeout: 5s
+  # Database name.
+  database: featherauth
+  # User name.
+  user: featherauth
+  # File holding the password. Required with driver: postgres; read only then.
+  password_file: secrets/postgres_password
+  # TLS to the database: disable, require or verify-full.
+  sslmode: require
+  # PEM file with the certificate authority that signed the server's
+  # certificate, used with verify-full. Empty uses the system's certificate
+  # store. Ignored with disable and require.
+  root_cert_file: ""
+  # Connection pool size.
+  max_open_conns: 20
+  # Idle connections kept.
+  max_idle_conns: 5
+  # Connection reuse limit. Greater than zero.
+  conn_max_lifetime: 30m
+
+# Daily snapshots of a SQLite database.
+backup:
+  # Where SQLite snapshots are written for a cron job to copy off the server.
+  # Empty disables backup.
+  directory: /var/backups/featherauth
+  # Time of the daily snapshot, server local time, as HH:MM. Empty for no
+  # built-in schedule.
+  at: "03:00"
+  # Newest snapshots kept, older ones deleted. 1 or more.
+  keep: 7

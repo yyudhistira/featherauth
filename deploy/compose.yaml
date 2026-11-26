@@ -1,0 +1,46 @@
+# FeatherAuth alone, for a host that already has a reverse proxy.
+# The port is published on 127.0.0.1 only, so nothing can bypass the proxy.
+# The proxy reaches the service at 127.0.0.1:8080; list the container network's
+# gateway range in trusted_proxies (server.yaml).
+#
+# Variables: FEATHERAUTH_CONFIG is the host directory with the configuration
+# (default ./config); FEATHERAUTH_TAG is the image tag and is required, with no
+# default (the deploy workflow sets it to a commit SHA, and setting the previous
+# tag is the rollback): without it compose stops with a message naming it.
+#
+#   FEATHERAUTH_CONFIG=/etc/featherauth docker compose up -d
+services:
+  featherauth:
+    image: ghcr.io/yyudhistira/featherauth:${FEATHERAUTH_TAG:?set FEATHERAUTH_TAG to the image tag (the deploy sets it; a rollback sets the previous tag)}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    # Docker waits up to 35 seconds after SIGTERM before it kills the process:
+    # the 30-second drain of OPS-13 plus 5 for closing the database and exiting.
+    stop_grace_period: 35s
+    # Container hardening (SEC-31): the root filesystem is read-only, no Linux
+    # capability is held and no process can gain one. SQLite's temporary files
+    # go to the tmpfs at /tmp; the data and backup volumes are the only other
+    # writable paths.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    environment:
+      FEATHERAUTH_CONFIG_DIR: /etc/featherauth
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Configuration, from the host (never touched by the deploy).
+      - ${FEATHERAUTH_CONFIG:-./config}:/etc/featherauth:ro
+      # SQLite file and backups.
+      - data:/var/lib/featherauth
+      - backups:/var/backups/featherauth
+
+volumes:
+  data:
+  backups:

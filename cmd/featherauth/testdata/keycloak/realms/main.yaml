@@ -1,0 +1,40 @@
+# Copy of the structure of an existing realm, with placeholder values. It has a
+# public client that sends no PKCE challenge (require_pkce: false), inside the
+# limits of FR-32: a 30 minute idle lifetime and a 10 hour session.
+name: main
+display_name: Example app
+
+tokens:
+  access_token_lifetime: 15m
+  refresh_idle_lifetime: 30m
+  session_max_lifetime: 10h
+  code_lifetime: 60s
+  login_timeout: 30m
+  algorithm: RS256
+  refresh_token_format: jwt
+
+keys:
+  - kid: main-2026-11
+    file: secrets/main/signing-2026-11.pem
+    state: active
+
+providers:
+  google:
+    enabled: true
+    client_id: example-client-id.apps.googleusercontent.com
+    client_secret_file: secrets/main/google_client_secret
+    scopes: [openid, email, profile]
+    trust_email: true
+    sync_mode: import
+  apple:
+    enabled: false
+
+clients:
+  app:
+    name: example app
+    type: public
+    redirect_uris: [com.example.app:/cb, com.example.app.beta:/cb, com.example.app.dev:/cb]
+    post_logout_redirect_uris: []
+    require_pkce: false
+    response_mode: fragment
+    audience: account

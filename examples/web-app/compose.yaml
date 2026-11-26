@@ -1,0 +1,27 @@
+# The example web app in a container: `docker compose -f examples/web-app/compose.yaml up --build`,
+# then open http://127.0.0.1:5173/. The port is published on 127.0.0.1 only: the
+# redirect URI of example-web-client.yaml is http://127.0.0.1:5173/callback, and
+# nobody else on the network should reach the example. ./public/config.json is
+# mounted read-only over the image's copy: edit `authority` there and restart
+# the container (`docker compose ... up -d --force-recreate`); no rebuild.
+name: featherauth-example-web-app
+services:
+  web-app:
+    build: .
+    image: featherauth-example-web-app:local
+    ports:
+      - "127.0.0.1:5173:5173"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ./public/config.json:/srv/config.json:ro
+    tmpfs:
+      - /data
+      - /config
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5173/"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 2s

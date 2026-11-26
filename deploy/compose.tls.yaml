@@ -1,0 +1,50 @@
+# Built-in TLS: FeatherAuth alone, ending TLS itself (tls.mode files), for a host
+# with no reverse proxy. Use it in place of compose.yaml:
+#
+#   FEATHERAUTH_CONFIG=/etc/featherauth docker compose -f compose.tls.yaml up -d
+#
+# The configuration directory holds server.yaml (copied from
+# config/server.tls.yaml.example) and the certificate and the key it names,
+# secrets/tls_cert.pem and secrets/tls_key.pem. The HTTPS listener is published as
+# the host's port 443 and the redirect listener as port 80. The loopback listener
+# is not published: featherauth healthcheck calls it inside the container. The
+# hardening of compose.yaml (SEC-31) is kept, and no capability is added, because
+# the ports the container binds are not privileged.
+#
+# Variables: FEATHERAUTH_CONFIG is the host directory with the configuration
+# (default ./config); FEATHERAUTH_TAG is the image tag and is required, with no
+# default, as in compose.yaml.
+services:
+  featherauth:
+    image: ghcr.io/yyudhistira/featherauth:${FEATHERAUTH_TAG:?set FEATHERAUTH_TAG to the image tag (the deploy sets it; a rollback sets the previous tag)}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    # Docker waits up to 35 seconds after SIGTERM before it kills the process:
+    # the 30-second drain of OPS-13 plus 5 for closing the database and exiting.
+    stop_grace_period: 35s
+    # Container hardening (SEC-31): the same settings as compose.yaml.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    environment:
+      FEATHERAUTH_CONFIG_DIR: /etc/featherauth
+    ports:
+      # The HTTPS listener (tls.listen) and the redirect listener (tls.http_listen).
+      - "443:8443"
+      - "80:8081"
+    volumes:
+      # Configuration, the certificate and the key included, from the host.
+      - ${FEATHERAUTH_CONFIG:-./config}:/etc/featherauth:ro
+      # SQLite file and backups.
+      - data:/var/lib/featherauth
+      - backups:/var/backups/featherauth
+
+volumes:
+  data:
+  backups:

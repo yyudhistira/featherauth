@@ -1,0 +1,8 @@
+{{define "content" -}}
+<h1>{{.T "data_deletion.title"}}</h1>
+<p>{{.T "data_deletion.in_app"}}</p>
+{{with .Code}}<p class="confirmation">{{$.T "data_deletion.confirmed"}} <code>{{.}}</code></p>
+{{end -}}
+{{with .Contact}}<p class="contact">{{$.T "data_deletion.contact"}} <a href="{{.Href}}">{{.Text}}</a></p>
+{{end -}}
+{{end}}

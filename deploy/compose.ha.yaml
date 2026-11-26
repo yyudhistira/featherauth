@@ -1,0 +1,107 @@
+# Several instances of FeatherAuth on one Postgres database, behind Caddy with
+# active health checks. Use it on its own, in place of compose.yaml.
+# Run from the repository root, with the project name deploy/ops/rolling-deploy.sh
+# uses:
+#
+#   FEATHERAUTH_CONFIG=/etc/featherauth FEATHERAUTH_TAG=<tag> docker compose -p featherauth-ha -f deploy/compose.ha.yaml up -d
+#
+# The configuration directory holds database.yaml with driver: postgres,
+# postgres.host: postgres, password_file: secrets/postgres_password and
+# sslmode: disable, and a server.yaml with rate_limit.store: database if the
+# limit must hold across the instances. The password file is written as in
+# compose.postgres.yaml (mode 0600, owned by uid 65532).
+#
+# Caddy publishes 127.0.0.1:8080 only; the two instances publish no port. Caddy
+# checks /readyz of each instance and sends requests only to those that answer
+# 200. deploy/ops/rolling-deploy.sh replaces the instances one at a time.
+#
+# Variables: FEATHERAUTH_CONFIG is the host directory with the configuration
+# (default ./config); FEATHERAUTH_TAG is the image tag (required: the deploy sets
+# it, and so do the ops scripts).
+x-featherauth: &featherauth
+  image: ghcr.io/yyudhistira/featherauth:${FEATHERAUTH_TAG:?set FEATHERAUTH_TAG to the image tag}
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  restart: unless-stopped
+  # Docker waits up to 35 seconds after SIGTERM before it kills the process:
+  # the 30-second drain of OPS-13 plus 5 for closing the database and exiting.
+  stop_grace_period: 35s
+  # Container hardening (SEC-31): the same settings as compose.yaml.
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp
+  environment:
+    FEATHERAUTH_CONFIG_DIR: /etc/featherauth
+  volumes:
+    - ${FEATHERAUTH_CONFIG:-./config}:/etc/featherauth:ro
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    # Pinned by version and digest; update both together (as compose.postgres.yaml).
+    image: postgres:18@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
+    restart: unless-stopped
+    # Hardening (SEC-44), as far as the image allows. The entrypoint starts as
+    # root, reads the password file (DAC_OVERRIDE), takes ownership of the data
+    # and socket directories (CHOWN) and drops to the postgres user (SETUID,
+    # SETGID). deploy/ops/check-postgres.sh proves that removing any one of
+    # them stops the container. Writable: the data volume and the tmpfs
+    # at /var/run/postgresql (no /tmp: Postgres writes its temporary files under
+    # its data directory).
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/run/postgresql
+    environment:
+      POSTGRES_USER: featherauth
+      POSTGRES_DB: featherauth
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U featherauth -d featherauth"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ${FEATHERAUTH_CONFIG:-./config}/secrets/postgres_password:/run/secrets/postgres_password:ro
+
+  app1:
+    <<: *featherauth
+
+  app2:
+    <<: *featherauth
+
+  caddy:
+    # Pinned by version and digest; update both together (as compose.caddy.yaml).
+    image: caddy:2.11.9@sha256:9c1b76fb701c1f77383d3124d9f626e38bcf83bc1255ed47475d4f2420701d03
+    restart: unless-stopped
+    depends_on:
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./Caddyfile.ha:/etc/caddy/Caddyfile:ro
+      - caddy_config:/config
+
+volumes:
+  postgres-data:
+  caddy_config:

@@ -1,0 +1,6 @@
+{
+  "authority": "https://auth.example.com/example",
+  "client_id": "example-web",
+  "redirect_uri": "http://127.0.0.1:5173/callback",
+  "post_logout_redirect_uri": "http://127.0.0.1:5173/"
+}

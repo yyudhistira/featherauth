@@ -1,0 +1,13 @@
+# The suite's own plan runner (scripts/run-test-plan.py), at the commit of the
+# release the compose file pins.
+# The apt and pip installs below are not pinned, so the runner image is not
+# reproducible; the suite itself (images, commit) is pinned.
+FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+ARG SUITE_COMMIT=23353b36957d6466010de767c812d2c91ed37638
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init /suite && cd /suite \
+    && git fetch --depth 1 https://gitlab.com/openid/conformance-suite.git ${SUITE_COMMIT} \
+    && git checkout FETCH_HEAD \
+    && pip install --no-cache-dir -r scripts/requirements.txt
+WORKDIR /suite

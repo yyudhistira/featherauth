@@ -1,0 +1,12 @@
+driver: sqlite
+
+sqlite:
+  path: /var/lib/featherauth/featherauth.db
+  busy_timeout: 5s
+  journal_mode: wal
+  read_connections: 4
+
+backup:
+  directory: /var/backups/featherauth
+  at: "03:00"
+  keep: 7

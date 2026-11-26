@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Continue</title>
+</head>
+<body>
+<form method="post" action="https://app.example.com/cb?tenant=a">
+<input type="hidden" name="code" value="abc123">
+<input type="hidden" name="iss" value="https://auth.example.com/main">
+<input type="hidden" name="state" value="st ate/1">
+<noscript>
+<p>You are being sent back to the app.</p>
+<button type="submit">Continue</button>
+</noscript>
+</form>
+<script>document.forms[0].submit();</script>
+</body>
+</html>

@@ -1,0 +1,268 @@
+name: deploy
+
+# On every push to main: the checks of ci.yml, build, tag with the commit SHA,
+# push to ghcr.io, then pull and start it on the host over SSH, wait up to 30
+# seconds for /readyz and roll back to the previous tag on failure
+# (deploy/ops/deploy-remote.sh). The config directory on the host is never touched.
+#
+# Secrets (SSH credentials only): DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY (a
+# private key) and DEPLOY_KNOWN_HOSTS (the host's line for known_hosts).
+# Repository variable: DEPLOY_PATH, the directory on the host with compose.yaml.
+# The host must be able to pull the image (a public package, or one docker login
+# on the host). The first deploy on a fresh host is manual (README).
+# Without the variable DEPLOY_PATH the deploy job is skipped (there is no host
+# yet), and the image is still built and pushed. With DEPLOY_PATH set and a
+# secret missing, the deploy job fails after the image is pushed.
+#
+# The checks are skipped when they already passed (deploy/ops/tested-tree.sh, the
+# "tested" job): on a push to main when exactly the same git tree was tested
+# green by ci.yml on the merged pull request (the status ci/tested-tree), on a
+# release tag when the tagged commit already has a successful deploy.yml run for
+# a push to main. In every other case, and on any error, the checks run.
+#
+# The checks and the deploy are also skipped for a documentation-only commit (or
+# one that only changes comments of Go files) pushed to a branch
+# (deploy/ops/changed-files.sh, the "docs" step of the tested job),
+# but only when its parent commit already has a successful deploy.yml run for a
+# push to main (the tag lookup of deploy/ops/tested-tree.sh): a documentation
+# commit never makes an untested commit look tested. The image is still built, so
+# every commit of main has one; it is not deployed. A tag is never documentation-only.
+#
+# A pushed tag vMAJOR.MINOR.PATCH (digits only) runs the checks (unless they
+# already passed on main, see above), then builds the image with VERSION set to
+# the tag name and pushes it tagged with the tag name only (not the SHA, not
+# latest). It never deploys. The build fails before anything is built or pushed
+# when the tagged commit is not reachable from main. A release tag is never
+# moved; a fix is a new tag.
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  # Decides whether the checks may be skipped. The scripts print true only for the
+  # cases above; they never fail on a GitHub API error (false). skip is true for a
+  # tree match or a documentation-only commit; docs_only is true for the latter
+  # only, and also stops the deploy.
+  tested:
+    runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: read
+      actions: read
+    outputs:
+      skip: ${{ steps.tested.outputs.skip == 'true' || steps.docs.outputs.docs_only == 'true' }}
+      docs_only: ${{ steps.docs.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Decide whether the checks can be skipped
+        id: tested
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          MODE: ${{ github.ref_type }}
+          GH_TOKEN: ${{ github.token }}
+        run: sh deploy/ops/tested-tree.sh "$REPO" "$SHA" "$MODE"
+      # A documentation-only commit pushed to a branch whose parent passed on
+      # main. Both scripts run with GITHUB_OUTPUT unset (they only print their
+      # line, which is read here) and any failure, a missing parent or a parent
+      # without a successful run on main gives false: the checks run. A tag is
+      # never documentation-only.
+      - name: Decide whether the commit is documentation-only
+        id: docs
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          docs_only=false
+          if [ "$REF_TYPE" = branch ]; then
+            only=$(GITHUB_OUTPUT='' sh deploy/ops/changed-files.sh "$REPO" commit "$SHA") || only=
+            if printf '%s\n' "$only" | grep -qx docs_only=true; then
+              parent=$(gh api "repos/$REPO/commits/$SHA" --jq '.parents[0].sha' 2>/dev/null) || parent=
+              case "$parent" in
+                *[!0123456789abcdef]*) parent= ;;
+              esac
+              if [ "${#parent}" -eq 40 ]; then
+                tested=$(GITHUB_OUTPUT='' sh deploy/ops/tested-tree.sh "$REPO" "$parent" tag) || tested=
+                if [ "$tested" = skip=true ]; then docs_only=true; fi
+              fi
+            fi
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+      - name: Say that the checks are skipped
+        if: ${{ steps.tested.outputs.skip == 'true' }}
+        env:
+          MODE: ${{ github.ref_type }}
+        run: |
+          if [ "$MODE" = tag ]; then
+            why="the tagged commit already has a successful deploy.yml run for a push to main"
+          else
+            why="the same git tree was already tested successfully on its merged pull request"
+          fi
+          echo "The checks were skipped: $why." >> "$GITHUB_STEP_SUMMARY"
+      - name: Say that the commit is documentation-only
+        if: ${{ steps.docs.outputs.docs_only == 'true' }}
+        run: |
+          echo "The checks and the deploy were skipped: this is a documentation-only commit and its parent already passed on main. The image is still built." >> "$GITHUB_STEP_SUMMARY"
+
+  checks:
+    # A called workflow cannot request more permissions than its caller grants,
+    # and GitHub validates this before the job's if: the statuses: write job
+    # record-tested-tree in ci.yml would otherwise make every run of this
+    # workflow fail to start. The jobs inside ci.yml ask for contents: read only
+    # here (record-tested-tree is skipped, its event is push). pull-requests: read
+    # is for the changes job of ci.yml (it lists the files of a pull request).
+    permissions:
+      contents: read
+      statuses: write
+      pull-requests: read
+    needs: tested
+    if: ${{ needs.tested.outputs.skip != 'true' }}
+    uses: ./.github/workflows/ci.yml
+
+  # Runs when the checks passed, or when they were skipped because tested said so;
+  # never when they failed or were cancelled.
+  build:
+    needs: [tested, checks]
+    if: ${{ !cancelled() && needs.tested.result == 'success' && (needs.checks.result == 'success' || (needs.checks.result == 'skipped' && needs.tested.outputs.skip == 'true')) }}
+    runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
+    # id-token signs keylessly with the workflow's identity (cosign), attestations
+    # records the SBOM and the build provenance. Only this job gets them (SEC-42).
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/yyudhistira/featherauth
+      SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the tag check needs the history of origin/main
+          persist-credentials: false
+      - name: Check that the tagged commit is on main
+        if: ${{ github.ref_type == 'tag' }}
+        run: |
+          if ! git merge-base --is-ancestor "$SHA" refs/remotes/origin/main; then
+            echo "the tagged commit is not reachable from main; nothing was built or pushed" >&2
+            exit 1
+          fi
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - name: Build
+        if: ${{ github.ref_type == 'branch' }}
+        run: docker build -f deploy/Dockerfile --build-arg "VERSION=$SHA" -t "$IMAGE:$SHA" .
+      - name: Push
+        if: ${{ github.ref_type == 'branch' }}
+        run: docker push "$IMAGE:$SHA"
+      - name: Build release tag
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: docker build -f deploy/Dockerfile --build-arg "VERSION=$REF_NAME" -t "$IMAGE:$REF_NAME" .
+      - name: Push release tag
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: docker push "$IMAGE:$REF_NAME"
+      # Everything below signs and describes the image that was pushed, by its
+      # digest. The digest is the one the registry holds for the tag just pushed.
+      - name: Record the pushed image digest
+        id: digest
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then ref="$IMAGE:$REF_NAME"; else ref="$IMAGE:$SHA"; fi
+          repo_digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")
+          digest=${repo_digest#*@}
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "no digest for $ref" >&2; exit 1 ;;
+          esac
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "ref=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: Sign the image by digest
+        env:
+          IMAGE_DIGEST: ${{ steps.digest.outputs.ref }}
+        run: cosign sign --yes "$IMAGE_DIGEST"
+      - name: Make the software bill of materials
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ steps.digest.outputs.ref }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: "false"
+          upload-release-assets: "false"
+      - name: Attach the SBOM as an attestation
+        env:
+          IMAGE_DIGEST: ${{ steps.digest.outputs.ref }}
+        run: cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$IMAGE_DIGEST"
+      # GitHub stores build provenance only for a public repository (a private one
+      # answers "Feature not available for user-owned private repositories"), so
+      # this step runs only when the repository is public. The signature and the
+      # SBOM attestation above are made for every repository.
+      - name: Attest the build provenance
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/yyudhistira/featherauth
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+  deploy:
+    needs: [tested, build]
+    # Not for a documentation-only commit: the running service is unchanged.
+    # !cancelled() and the explicit results: without a status function GitHub applies
+    # an implicit success() to every ancestor in the needs chain, so a skipped
+    # checks job (tree already tested) would skip the deploy too.
+    if: ${{ !cancelled() && needs.tested.result == 'success' && needs.build.result == 'success' && vars.DEPLOY_PATH != '' && github.ref_type == 'branch' && needs.tested.outputs.docs_only != 'true' }}
+    runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Deploy over SSH
+        env:
+          SHA: ${{ github.sha }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          case "$DEPLOY_PATH" in
+            ""|-*|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./-]*)
+              echo "DEPLOY_PATH must be set and use only letters, digits, _ . / -" >&2
+              exit 1 ;;
+          esac
+          umask 077
+          key=$(mktemp)
+          known=$(mktemp)
+          trap 'rm -f "$key" "$known"' EXIT
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known"
+          ssh -i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 \
+            -o UserKnownHostsFile="$known" "$DEPLOY_USER@$DEPLOY_HOST" \
+            sh -s -- "$SHA" "$DEPLOY_PATH" < deploy/ops/deploy-remote.sh

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("signed_request=m8z2fIlA-eTjPxCta0RGp7tYGdDHLojZEAs8arit5bd.eyJhbGdvcml0aG0iOiJITUFDLVNIQTI1NiIsImlzc3VlZF9hdCI6MTg5MzU1MzQ0NSwidXNlcl9pZCI6IjEwMDAxIn0")
