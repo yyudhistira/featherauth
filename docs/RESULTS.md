@@ -241,33 +241,33 @@ Each run is on a real HTTPS domain behind nginx with a real Apple account. The `
 
 ## Release gate
 
-- Release:
-- Commit:
-- Date:
+- Release: v1.0.0
+- Commit: fc2a9c47b018f10f8794c81921dc9cebb5011878
+- Date: 2026-11-26
 
-No gate is recorded yet under the release check of `docs/RELEASING.md`. The conformance, load, browser and Apple results above stay in their own sections. Each row below is filled at the next release, with a value defined in `docs/RELEASING.md` and a detail; `TestReleaseGateResultsRecorded` (build tag `manual`) fails while any row is empty.
+The release check of `docs/RELEASING.md` before the tag ran on this commit on 2026-11-26 (`make release-check`); rows 1 to 10 are its result lines. The manual checks M1 to M6 were not run for this first release, by the decision of the release owner. Rows 11 to 13 are filled after the tag.
 
 | Check | Result | Detail |
 | --- | --- | --- |
-| 1 |  |  |
-| 2 |  |  |
-| 3 |  |  |
-| 4 |  |  |
-| 5 |  |  |
-| 6 |  |  |
-| 7 |  |  |
-| 8 |  |  |
-| 9 |  |  |
-| 10 |  |  |
+| 1 | pass | deploy run 45902095812, its checks ran and every job is green |
+| 2 | pass | no entry |
+| 3 | pass | direct requirements are in the Tech stack, govulncheck and npm audit find nothing, exact versions in package.json |
+| 4 | pass | signature verified; config check of the shipped examples exit 0; RELEASE_CONFIG_DIR not set: the shipped examples only |
+| 5 | not applicable: there is no previous release | no release tag exists, so there is no previous image |
+| 6 | pass | pg_dump encrypted with age, restored on a clean Postgres, users and a refresh token intact |
+| 7 | no change since 664364815b01c4e3aa249180b8986d454816f6d3 | the conformance paths of deploy/release-paths.txt did not change since 664364815b01c4e3aa249180b8986d454816f6d3 |
+| 8 | no change since 664364815b01c4e3aa249180b8986d454816f6d3 | the load paths of deploy/release-paths.txt did not change since 664364815b01c4e3aa249180b8986d454816f6d3 |
+| 9 | pass | listed above: required or no change since |
+| 10 | pass | written to release-out/results.md |
 | 11 |  |  |
 | 12 |  |  |
 | 13 |  |  |
-| M1 |  |  |
-| M2 |  |  |
-| M3 |  |  |
-| M4 |  |  |
-| M5 |  |  |
-| M6 |  |  |
+| M1 | not run: the guide and release-notes review is deferred for the first release; accepted by yyudhistira | manual check of `docs/RELEASING.md` |
+| M2 | not run: no real sign-in per provider on a test deployment for the first release; accepted by yyudhistira | manual check of `docs/RELEASING.md` |
+| M3 | not run: the browser matrix is deferred for the first release; accepted by yyudhistira | manual check of `docs/RELEASING.md` |
+| M4 | not run: no Apple test on a real domain for the first release; accepted by yyudhistira | manual check of `docs/RELEASING.md` |
+| M5 | not run: no TLS test host for the first release; accepted by yyudhistira | manual check of `docs/RELEASING.md` |
+| M6 | not run: no throwaway repository for the workflow rules for the first release; accepted by yyudhistira | manual check of `docs/RELEASING.md` |
 
 ### Release tags
 
