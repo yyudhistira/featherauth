@@ -5,11 +5,11 @@ The latest result of each check that is run by hand or for a release, and only t
 ## Load
 
 - Date: 2026-11-26
-- Commit: 6d07549b52d06db860737e674920eee6226466cc
+- Commit: 664364815b01c4e3aa249180b8986d454816f6d3
 - Machine: Apple M2 Pro (12 cores, macOS 27.2.1), Docker Desktop 6.12.54-linuxkit (aarch64 VM with 12 CPUs and 8 GB), docker 28.5.2; FeatherAuth in a container limited with `cpus: 1` and `mem_limit: 512m`, Postgres (Postgres runs only) in its own container without a limit, the proxies, k6 and the mock identity provider on the same machine
 - Tools: k6 1.4.2 (`grafana/k6:1.4.2`, pinned by digest in `deploy/load/compose.yaml`), Caddy 2.11.9, nginx 1.28, Postgres 18 (`postgres:18`, pinned by digest); the image built with Go 1.27.4 (`golang:1.27.4`, pinned by digest in `deploy/Dockerfile`); memory from `/proc/1/status` (`VmRSS`, `VmHWM`) of the service process and CPU from `docker stats`; percentiles from k6 (the client side, through Caddy) and from the service's own request log (`duration_ms`)
 
-On 2026-11-26, on this commit, both runs were made with `-v` and passed: `make load` (SQLite) exited 0 in 5,527.0 s and `make load LOAD_DRIVER=postgres` exited 0 in 5,538.7 s, each holding the figures of NFR-01 to NFR-11 for its driver. Every figure below is from these two runs. Both runs had 0 failed requests in every scenario and the restart loops, and 0 request log lines with status 4xx or 5xx in every scenario whose log was read. Every scenario is on the real image, with a fresh database seeded with 1,000 users logged in through the mock identity provider (a refresh token each), `rate_limit.per_ip_per_minute: 0` (except the rate limiter scenario), the default log level and `https://auth.example.com` as `public_url`. The shapes are those of the Load verification: steady 20 iterations a second for 10 minutes (about 23 requests a second: 40% refresh, 35% userinfo, 20% JWKS, 5% a whole login), the held peak of 1,000 connections in a closed loop for 5 minutes, the burst of 1,000 refreshes at the same instant, and the soak of 1 hour.
+On 2026-11-26 both runs were made with `-v` and passed on commit 6d07549 of the earlier development repository, whose files on every load path of `deploy/release-paths.txt` are the same as this commit's (it differs only in documents); runs on a commit with the same files on those paths also passed on 2026-11-26, without `-v`, so their figures are not recorded: `make load` (SQLite) exited 0 in 5,527.0 s and `make load LOAD_DRIVER=postgres` exited 0 in 5,538.7 s, each holding the figures of NFR-01 to NFR-11 for its driver. Every figure below is from these two runs. Both runs had 0 failed requests in every scenario and the restart loops, and 0 request log lines with status 4xx or 5xx in every scenario whose log was read. Every scenario is on the real image, with a fresh database seeded with 1,000 users logged in through the mock identity provider (a refresh token each), `rate_limit.per_ip_per_minute: 0` (except the rate limiter scenario), the default log level and `https://auth.example.com` as `public_url`. The shapes are those of the Load verification: steady 20 iterations a second for 10 minutes (about 23 requests a second: 40% refresh, 35% userinfo, 20% JWKS, 5% a whole login), the held peak of 1,000 connections in a closed loop for 5 minutes, the burst of 1,000 refreshes at the same instant, and the soak of 1 hour.
 
 ### SQLite
 
@@ -172,10 +172,10 @@ The limiter and the spread addresses add under 1 ms at the 95th percentile.
 ## Conformance
 
 - Date: 2026-11-26
-- Commit: 6d07549b52d06db860737e674920eee6226466cc
+- Commit: 664364815b01c4e3aa249180b8986d454816f6d3
 - Suite: release-v5.3.4 (OpenID conformance suite commit 23353b36957d6466010de767c812d2c91ed37638; the images are pinned by digest in `deploy/conformance/compose.yaml`)
 
-`TestConformanceSuite` (the test `make conformance` runs, with `-v`) passed in 79.9 seconds: FeatherAuth is the real image behind Caddy with an internal certificate authority, one realm `conf` with `sso.enabled`, one generic `oidc` provider `sso` pointing at the mock identity provider, and two static confidential clients (`suite1` with `client_secret_basic`, `suite2` with `client_secret_post`, both `require_pkce: false`). No test condition failed in any plan.
+`TestConformanceSuite` (the test `make conformance` runs, with `-v`) passed in 79.9 seconds on commit 6d07549 of the earlier development repository, whose files on every conformance path of `deploy/release-paths.txt` are the same as this commit's; a run on a commit with the same files on those paths also passed on 2026-11-26 (79.9 seconds). The run recorded: FeatherAuth is the real image behind Caddy with an internal certificate authority, one realm `conf` with `sso.enabled`, one generic `oidc` provider `sso` pointing at the mock identity provider, and two static confidential clients (`suite1` with `client_secret_basic`, `suite2` with `client_secret_post`, both `require_pkce: false`). No test condition failed in any plan.
 
 ### Summary
 
