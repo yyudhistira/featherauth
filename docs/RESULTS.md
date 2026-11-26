@@ -245,7 +245,7 @@ Each run is on a real HTTPS domain behind nginx with a real Apple account. The `
 - Commit: fc2a9c47b018f10f8794c81921dc9cebb5011878
 - Date: 2026-11-26
 
-The release check of `docs/RELEASING.md` before the tag ran on this commit on 2026-11-26 (`make release-check`); rows 1 to 10 are its result lines. The manual checks M1 to M6 were not run for this first release, by the decision of the release owner. Rows 11 to 13 are filled after the tag.
+The release check of `docs/RELEASING.md` before the tag ran on this commit on 2026-11-26 (`make release-check`); rows 1 to 10 are its result lines. The manual checks M1 to M6 were not run for this first release, by the decision of the release owner. Rows 11 to 13 are the result lines of `make release-check TAG=v1.0.0` after the tag.
 
 | Check | Result | Detail |
 | --- | --- | --- |
@@ -259,9 +259,9 @@ The release check of `docs/RELEASING.md` before the tag ran on this commit on 20
 | 8 | no change since 664364815b01c4e3aa249180b8986d454816f6d3 | the load paths of deploy/release-paths.txt did not change since 664364815b01c4e3aa249180b8986d454816f6d3 |
 | 9 | pass | listed above: required or no change since |
 | 10 | pass | written to release-out/results.md |
-| 11 |  |  |
-| 12 |  |  |
-| 13 |  |  |
+| 11 | pass | run 45905155702, image sha256:80c3b74322a26046104b9dd1b64a7f4076424d0c9577a81b767a6f7ab54c2c93 prints v1.0.0, no latest, no new commit-hash tag |
+| 12 | pass | release sha256:80c3b74322a26046104b9dd1b64a7f4076424d0c9577a81b767a6f7ab54c2c93 and commit sha256:a65cc48b82fee48c86050657f616cf919ca08f36c0f7c2b724c20344ccf5c4e6: signature and SBOM verified; gh attestation verify: not applicable (private repository) |
+| 13 | not applicable: first release: the table of release tags is only written | table written to release-out/results.md |
 | M1 | not run: the guide and release-notes review is deferred for the first release; accepted by yyudhistira | manual check of `docs/RELEASING.md` |
 | M2 | not run: no real sign-in per provider on a test deployment for the first release; accepted by yyudhistira | manual check of `docs/RELEASING.md` |
 | M3 | not run: the browser matrix is deferred for the first release; accepted by yyudhistira | manual check of `docs/RELEASING.md` |
@@ -273,5 +273,4 @@ The release check of `docs/RELEASING.md` before the tag ran on this commit on 20
 
 | Tag | Commit | Image digest |
 | --- | --- | --- |
-
-No release is recorded yet: the first `make release-check TAG=...` writes this table.
+| v1.0.0 | 7a8ccba343378fb0b7979accb212f685a07770bb | sha256:80c3b74322a26046104b9dd1b64a7f4076424d0c9577a81b767a6f7ab54c2c93 |
