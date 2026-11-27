@@ -1,10 +1,16 @@
 name: ci
 
 # Pull requests, and deploy.yml, which calls this workflow so that a deploy runs
-# the same checks (deploy.yml may skip them, see its header).
+# the same checks (deploy.yml may skip them, see its header). deploy.yml passes
+# docs_only: true for a documentation-only commit whose parent passed on main:
+# then only the key scan and the docs job run.
 on:
   pull_request:
   workflow_call:
+    inputs:
+      docs_only:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,12 +29,11 @@ concurrency:
 jobs:
   # Decides whether the pull request changes documentation only, or only
   # comments of Go files: the rules are in deploy/ops/changed-files.sh,
-  # which compares the base and the head commit of the event. docs_only skips all
-  # the test jobs. slow_skip is true for those changes and also for a change of
-  # tools/trace/pending.txt (with documentation files at most): it skips browser,
-  # ops and postgres only, check still runs (make trace reads that file). Any
-  # other event (a push, a call from deploy.yml) says false for both without
-  # calling gh, so the tests always run there.
+  # which compares the base and the head commit of the event. docs_only skips
+  # check, browser, ops and postgres and runs the docs job instead. Any other
+  # event (a call from deploy.yml) says what the input docs_only says without
+  # calling gh, so a call without it runs every test job. A failed changes job
+  # gives an empty docs_only: every test job runs and docs is skipped.
   # pull-requests: read lets the script list the files of the pull request.
   changes:
     runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
@@ -37,7 +42,6 @@ jobs:
       pull-requests: read
     outputs:
       docs_only: ${{ steps.changes.outputs.docs_only }}
-      slow_skip: ${{ steps.changes.outputs.slow_skip }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,17 +54,19 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
           GH_TOKEN: ${{ github.token }}
+          DOCS_ONLY: ${{ inputs.docs_only }}
         run: |
           if [ "$EVENT" = pull_request ]; then
             sh deploy/ops/changed-files.sh "$REPO" compare "$BASE" "$HEAD"
+          elif [ "$DOCS_ONLY" = true ]; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
           else
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
-            echo "slow_skip=false" >> "$GITHUB_OUTPUT"
           fi
 
   # The scan for private keys in tracked files (the one TestRepositoryHoldsNoSecretFiles
   # runs). It runs on every run, also when the tests are skipped for a
-  # documentation-only change: it is cheap and reads those files.
+  # documentation-only change: it is cheap and reads every tracked file.
   scan:
     runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
     permissions:
@@ -94,11 +100,11 @@ jobs:
           go-version-file: go.mod
       - run: make check
 
-  # Chromedp tests (build tag browser); the runner has Chrome. Skipped also when
-  # slow_skip is true (a change of tools/trace/pending.txt only).
+  # Chromedp tests (build tag browser); the runner has Chrome. Skipped, as check
+  # is, for a documentation-only change.
   browser:
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.slow_skip != 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -116,10 +122,10 @@ jobs:
   # Image build and the checks of the image, the proxy examples and the
   # off-server backup (build tag ops). On Linux the test fails when the network
   # probe is skipped, so the "port is not reachable from another host" check runs.
-  # Skipped also when slow_skip is true.
+  # Skipped, as check is, for a documentation-only change.
   ops:
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.slow_skip != 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -137,10 +143,10 @@ jobs:
   # it. Postgres 15 is the oldest supported version and 18 the newest stable major
   # as of 2026-11-15: bump 18 (and the default in the Makefile) when a newer major
   # ships.
-  # Skipped also when slow_skip is true, as the ops job is.
+  # Skipped, as check is, for a documentation-only change.
   postgres:
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.slow_skip != 'true' }}
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
@@ -158,15 +164,38 @@ jobs:
           POSTGRES_VERSION: ${{ matrix.postgres }}
         run: make postgres POSTGRES_VERSION="$POSTGRES_VERSION"
 
+  # The reader set (docs/DESIGN.md, CI/CD, Reader set): the tests and tools that
+  # read the documentation files, run only for a documentation-only change
+  # instead of check, browser, ops and postgres. The list of tests lives only
+  # here; TestOnlyTheReaderSetReadsDocumentation keeps it complete. Without a
+  # status function, success() is implied: a failed changes job skips it (and
+  # runs every test job instead). make trace compares pending.txt with
+  # origin/main and the history of the branch, so the checkout is full.
+  docs:
+    needs: changes
+    if: ${{ needs.changes.outputs.docs_only == 'true' }}
+    runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make trace
+      - run: go test -count=1 ./tools/trace/
+      - run: go test -count=1 -run '^(TestConformanceResultsRecordSuiteVersion|TestLoadResultsRecorded|TestReleaseGateNoChangeClaimsHold|TestReleaseCheckBeforeTheTag|TestReleaseCheckAfterTheTag|TestRepositoryHoldsNoSecretFiles|TestConfigReferenceMatchesDesign|TestEveryDocumentedOptionIsReachableFromSnapshot|TestEveryPossibleValueHasARule|TestServerOptionClassesMatchTheDesign|TestProviderOptionsEveryOptionHasAProof|TestSchemaMatchesDesign|TestRunbookCommandsExist|TestRunbookFlagsExistInUsage|TestEmergencyKeyRotationRunbook)$' ./cmd/featherauth/ ./deploy/ ./internal/config/ ./internal/provider/ ./internal/store/
+
   # After a green pull request run, records the git tree it tested as the commit
   # status ci/tested-tree on the head commit of the pull request. deploy.yml
   # reads it (deploy/ops/tested-tree.sh) to skip the same checks on the merge
   # to main. It is an optimisation: a failure (for example the read-only token
   # of a fork) must not fail the run, so the step has continue-on-error. It does
   # not run when deploy.yml calls this workflow (the event is push there). It
-  # needs every job and has no status function, so a skipped job (documentation-
-  # only, comment-only, or browser, ops and postgres skipped for pending.txt)
-  # skips it: no tree is recorded for a change that was not tested in full.
+  # needs every test job and has no status function, so a skipped job
+  # (documentation-only or comment-only) skips it: no tree is recorded for a
+  # change that was not tested in full.
   record-tested-tree:
     needs: [changes, scan, check, browser, ops, postgres]
     if: ${{ github.event_name == 'pull_request' }}

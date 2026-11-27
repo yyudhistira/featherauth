@@ -7,6 +7,7 @@
 # written to release-out/results.md.
 #
 #   sh deploy/ops/release-check.sh              items 1 to 10, on the checked-out commit
+#                                               (items 1 and 2 only on the gate commit: the short path)
 #   TAG=vX.Y.Z sh deploy/ops/release-check.sh   items 11 to 13, on the published release
 #
 # Needs git, gh (logged in), cosign, docker, jq, go and npm, and network access.
@@ -189,39 +190,92 @@ fi
 
 # ------------------------------------------------------------------- before the tag
 sha=$(git rev-parse HEAD) || exit 2
-
-# 1. The deploy run of the commit and every job of the checks.
-run=$(gh api "repos/$slug/actions/workflows/deploy.yml/runs?head_sha=$sha&event=push&per_page=100" \
-  --jq '[.workflow_runs[] | select(.head_branch == "main" and .head_sha == "'"$sha"'")] | max_by(.id) | [.id, .conclusion] | @tsv' 2>/dev/null) \
-  || stop 1 "CI of the commit" "the workflow runs are not available (gh logged in?)"
 tab=$(printf '\t')
-IFS=$tab read -r run_id run_conclusion <<EOF
+
+# gate_row ROW: the value of a row of the release gate section of docs/RESULTS.md.
+gate_row() { awk -F'|' -v k="$1" '/^## / { on = ($0 == "## Release gate") } on && $2 ~ "^ *" k " *$" { gsub(/^ +| +$/, "", $3); print $3 }' "$results_file" 2>/dev/null; }
+gate_release=$(awk '/^## / { on = ($0 == "## Release gate") } on && /^- Release:/ { sub(/^- Release:[ \t]*/, ""); sub(/[ \t]+$/, ""); print; exit }' "$results_file" 2>/dev/null)
+
+# Short path on the gate commit (DESIGN.md, Release check): the gate names a
+# release with no tag yet and a commit that is a proper ancestor of HEAD, and
+# the change between them is a documentation change by the rule and list of CI
+# (changed-files.sh). Then the code its run checked is the code of HEAD: only
+# items 1 and 2 run, and the gate's rows are checked. Any other case, and any
+# failure of changed-files.sh, runs items 1 to 10.
+short=
+gate_commit=$(section_commit "Release gate")
+case $gate_release in
+  v[0123456789]*.[0123456789]*.[0123456789]*)
+    if ! git rev-parse -q --verify "refs/tags/$gate_release" >/dev/null 2>&1 &&
+      [ -n "$gate_commit" ] && [ "$gate_commit" != "$sha" ] &&
+      git cat-file -e "$gate_commit^{commit}" 2>/dev/null &&
+      git merge-base --is-ancestor "$gate_commit" "$sha" 2>/dev/null; then
+      answer=$(GITHUB_OUTPUT='' sh deploy/ops/changed-files.sh "$slug" compare "$gate_commit" "$sha" 2>/dev/null) || answer=
+      [ "$answer" != docs_only=true ] || short=1
+    fi
+    ;;
+esac
+if [ -n "$short" ]; then
+  echo "gate: HEAD $sha differs from $gate_commit only in documentation files: items 3 to 10 as recorded in the release gate of $gate_release"
+fi
+
+# 1. The deploy run of the commit and every job of the checks. A deploy run of a
+# documentation-only commit (its checks / docs job ran) counts when its scan and
+# docs jobs are green and its first parent passes item 1 by these same rules,
+# through at most 20 documentation-only commits.
+cur=$sha
+of=
+docs_hops=0
+how=
+while :; do
+  run=$(gh api "repos/$slug/actions/workflows/deploy.yml/runs?head_sha=$cur&event=push&per_page=100" \
+    --jq '[.workflow_runs[] | select(.head_branch == "main" and .head_sha == "'"$cur"'")] | max_by(.id) | [.id, .conclusion] | @tsv' 2>/dev/null) \
+    || stop 1 "CI of the commit" "${how}the workflow runs are not available (gh logged in?)"
+  IFS=$tab read -r run_id run_conclusion <<EOF
 $run
 EOF
-[ -n "${run_id:-}" ] && [ "$run_id" != null ] || stop 1 "CI of the commit" "no deploy run for the push of $sha to main"
-[ "$run_conclusion" = success ] || stop 1 "CI of the commit" "the deploy run $run_id concluded $run_conclusion"
-jobs=$(jobs_of "$run_id") || stop 1 "CI of the commit" "the jobs of deploy run $run_id are not available (gh failed)"
-ran=$(printf '%s\n' "$jobs" | awk -F'\t' '$1 ~ /^checks/ && $2 != "skipped" && $2 != "" { n++ } END { print n + 0 }')
-if [ "$ran" -gt 0 ]; then
-  problems=$(printf '%s\n' "$jobs" | required_jobs_ok) || stop 1 "CI of the commit" "deploy run $run_id: $problems"
-  how="deploy run $run_id, its checks ran and every job is green"
-else
-  head=$(gh api "repos/$slug/commits/$sha/pulls?per_page=100" \
-    --jq '[.[] | select(.merged_at != null and .merge_commit_sha == "'"$sha"'") | .head.sha] | unique | .[]' 2>/dev/null) || head=
-  case $head in
-    "" | *[!0123456789abcdef]*) stop 1 "CI of the commit" "the checks of deploy run $run_id were skipped and the merged pull request is not found" ;;
-  esac
-  ci=$(gh api "repos/$slug/actions/workflows/ci.yml/runs?head_sha=$head&event=pull_request&per_page=100" \
-    --jq '[.workflow_runs[] | select(.head_sha == "'"$head"'")] | max_by(.id) | [.id, .conclusion] | @tsv' 2>/dev/null) || ci=
-  IFS=$tab read -r ci_id ci_conclusion <<EOF
+  [ -n "${run_id:-}" ] && [ "$run_id" != null ] || stop 1 "CI of the commit" "${how}no deploy run for the push of $cur to main"
+  [ "$run_conclusion" = success ] || stop 1 "CI of the commit" "${how}the deploy run $run_id$of concluded $run_conclusion"
+  jobs=$(jobs_of "$run_id") || stop 1 "CI of the commit" "${how}the jobs of deploy run $run_id are not available (gh failed)"
+  docs_ran=$(printf '%s\n' "$jobs" | awk -F'\t' '$1 == "checks / docs" && $2 != "skipped" && $2 != "" { n++ } END { print n + 0 }')
+  if [ "$docs_ran" -gt 0 ]; then
+    docs_hops=$((docs_hops + 1))
+    [ "$docs_hops" -le 20 ] || stop 1 "CI of the commit" "${how}more than 20 documentation-only commits before a commit whose checks ran in full"
+    problems=$(printf '%s\n' "$jobs" | awk -F'\t' '
+      BEGIN { seen["scan"] = 0; seen["docs"] = 0 }
+      { n = $1; sub(/^checks \/ /, "", n); if (n in seen) { seen[n]++; if ($2 != "success") bad = bad " " $1 "=" $2 } }
+      END { for (k in seen) if (seen[k] == 0) bad = bad " checks / " k "=missing"
+            if (bad != "") { print "jobs not green:" bad; exit 1 } }') \
+      || stop 1 "CI of the commit" "${how}deploy run $run_id$of is a documentation change: $problems"
+    how="${how}deploy run $run_id of $cur is a documentation change (scan and docs green); "
+    parent=$(git rev-parse -q --verify "$cur^1" 2>/dev/null) || stop 1 "CI of the commit" "${how}$cur has no parent"
+    cur=$parent
+    of=" of $cur"
+    continue
+  fi
+  ran=$(printf '%s\n' "$jobs" | awk -F'\t' '$1 ~ /^checks/ && $2 != "skipped" && $2 != "" { n++ } END { print n + 0 }')
+  if [ "$ran" -gt 0 ]; then
+    problems=$(printf '%s\n' "$jobs" | required_jobs_ok) || stop 1 "CI of the commit" "${how}deploy run $run_id$of: $problems"
+    how="${how}deploy run $run_id$of, its checks ran and every job is green"
+  else
+    head=$(gh api "repos/$slug/commits/$cur/pulls?per_page=100" \
+      --jq '[.[] | select(.merged_at != null and .merge_commit_sha == "'"$cur"'") | .head.sha] | unique | .[]' 2>/dev/null) || head=
+    case $head in
+      "" | *[!0123456789abcdef]*) stop 1 "CI of the commit" "${how}the checks of deploy run $run_id$of were skipped and the merged pull request is not found" ;;
+    esac
+    ci=$(gh api "repos/$slug/actions/workflows/ci.yml/runs?head_sha=$head&event=pull_request&per_page=100" \
+      --jq '[.workflow_runs[] | select(.head_sha == "'"$head"'")] | max_by(.id) | [.id, .conclusion] | @tsv' 2>/dev/null) || ci=
+    IFS=$tab read -r ci_id ci_conclusion <<EOF
 $ci
 EOF
-  [ -n "${ci_id:-}" ] && [ "$ci_id" != null ] || stop 1 "CI of the commit" "the checks of deploy run $run_id were skipped and the ci run of the pull request is not found"
-  [ "$ci_conclusion" = success ] || stop 1 "CI of the commit" "the ci run $ci_id of the merged pull request concluded $ci_conclusion"
-  ci_jobs=$(jobs_of "$ci_id") || stop 1 "CI of the commit" "the jobs of ci run $ci_id are not available (gh failed)"
-  problems=$(printf '%s\n' "$ci_jobs" | required_jobs_ok) || stop 1 "CI of the commit" "ci run $ci_id: $problems"
-  how="deploy run $run_id (checks skipped), ci run $ci_id of the merged pull request, every job green"
-fi
+    [ -n "${ci_id:-}" ] && [ "$ci_id" != null ] || stop 1 "CI of the commit" "${how}the checks of deploy run $run_id$of were skipped and the ci run of the pull request is not found"
+    [ "$ci_conclusion" = success ] || stop 1 "CI of the commit" "${how}the ci run $ci_id of the merged pull request concluded $ci_conclusion"
+    ci_jobs=$(jobs_of "$ci_id") || stop 1 "CI of the commit" "${how}the jobs of ci run $ci_id are not available (gh failed)"
+    problems=$(printf '%s\n' "$ci_jobs" | required_jobs_ok) || stop 1 "CI of the commit" "${how}ci run $ci_id: $problems"
+    how="${how}deploy run $run_id$of (checks skipped), ci run $ci_id of the merged pull request, every job green"
+  fi
+  break
+done
 emit 1 "CI of the commit" pass "" "$how"
 
 # 2. tools/trace/pending.txt has no entry.
@@ -230,6 +284,29 @@ pending=tools/trace/pending.txt
 entries=$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$pending" | tr '\n' ' ')
 [ -z "$entries" ] || stop 2 "pending.txt" "entries remain: $entries"
 emit 2 "pending.txt" pass "" "no entry"
+
+# The short path ends here: the gate's rows describe the commit it names, and
+# rows 1 and 2 of this run describe HEAD. Every row 1 to 10 and M1 to M6 is
+# filled and none is fail, and rows 1 and 2 are pass.
+if [ -n "$short" ]; then
+  problems=
+  for r in 1 2 3 4 5 6 7 8 9 10 M1 M2 M3 M4 M5 M6; do
+    v=$(gate_row "$r")
+    if [ -z "$v" ]; then
+      problems="$problems $r(empty)"
+    elif [ "$v" = fail ]; then
+      problems="$problems $r(fail)"
+    elif { [ "$r" = 1 ] || [ "$r" = 2 ]; } && [ "$v" != pass ]; then
+      problems="$problems $r(not pass)"
+    fi
+  done
+  if [ -n "$problems" ]; then
+    echo "not ready: the rows of the release gate in $results_file are not filled or are fail:$problems"
+    exit 1
+  fi
+  echo "ready to tag"
+  exit 0
+fi
 
 # 3. Modules against the Tech stack, govulncheck, and the example web app.
 stack=$(awk '/^## Tech stack and code structure/ { on = 1; next } /^## / { on = 0 } on' docs/DESIGN.md)
@@ -351,7 +428,6 @@ fi
 # 9. The manual checks with a path list: required, or no change since the commit of the latest result.
 # browser and apple name the commit of the browser section; tls and workflow the
 # commit of the previous release gate, when that gate's row passed or claimed no change.
-gate_row() { awk -F'|' -v k="$1" '/^## / { on = ($0 == "## Release gate") } on && $2 ~ "^ *" k " *$" { gsub(/^ +| +$/, "", $3); print $3 }' "$results_file" 2>/dev/null; }
 manual_lines=
 for pair in "M3 browser" "M4 apple" "M5 tls" "M6 workflow"; do
   row=${pair% *}
@@ -377,8 +453,7 @@ emit 9 "manual checks" pass "" "listed above: required or no change since"
 emit 10 "result lines" pass "" "written to $results"
 # The rows count only when the section's "- Release:" names a version with no tag
 # yet (the release being prepared); the section of an earlier release, or one
-# naming no release, counts as empty.
-gate_release=$(awk '/^## / { on = ($0 == "## Release gate") } on && /^- Release:/ { sub(/^- Release:[ \t]*/, ""); sub(/[ \t]+$/, ""); print; exit }' "$results_file" 2>/dev/null)
+# naming no release, counts as empty. gate_release is read above.
 gate_rows=1
 note=
 case $gate_release in

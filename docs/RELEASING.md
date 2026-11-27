@@ -22,7 +22,7 @@ Release notes live only in GitHub Releases, one release per tag. They name every
 ## Cutting a release
 
 1. Merge what belongs in the release into `main` and wait for the `deploy` run of the merge to go green.
-2. Run `make release-check` on that commit (below) and the manual checks it reports as required. Put their results into `docs/RESULTS.md` (release gate section, with the values defined at the end of this file; no row may be `fail`) and commit them; that commit runs all checks (tests read the file), so wait for its `deploy` run to go green. This commit is the release commit.
+2. Run `make release-check` on that commit (below) and the manual checks it reports as required. Put their results into `docs/RESULTS.md` (release gate section, with the values defined at the end of this file; no row may be `fail`; `- Commit:` names the commit the check ran on) and commit them, through a pull request or straight to `main`. That commit is a documentation change (below), so CI runs only the private-key scan and the `docs` job, the tests that read the documents (a few minutes), and builds its image without deploying it; wait for its `deploy` run to go green. Then run `make release-check` again: because the commit differs from the one the first run checked only in documentation files, it runs items 1 and 2 for the new commit and checks the filled gate rows, runs nothing else (about a minute) and ends `ready to tag`. This commit is the release commit.
 3. Draft the release notes as a GitHub Release for the tag `vX.Y.Z`, not yet published (Releases, Draft a new release).
 4. Rehearse the tag path (below) when the workflow or these steps changed since the last rehearsal.
 5. Tag the release commit and push the tag:
@@ -83,7 +83,7 @@ git ls-remote --tags --refs https://github.com/yyudhistira/featherauth.git 'v*' 
 
 ## Documentation-only changes
 
-A change that touches only `README.md`, `CLAUDE.md`, `docs/RELEASING.md`, `deploy/ASSETS.md` or files under `.claude/`, or only comment and blank lines of Go files under the rules of DESIGN.md (Documentation-only changes), is documentation-only. `docs/DESIGN.md`, `docs/REQUIREMENTS.md` and `docs/RESULTS.md` are read by tests, so a change to them is never documentation-only, and neither is a change of `tools/trace/pending.txt`. On a pull request the test jobs are skipped and the private-key scan still runs; on a push to `main` the `checks` and `deploy` jobs are skipped and the image is still built, but only when the parent commit has a successful `deploy` run. The list lives in `deploy/ops/changed-files.sh` and DESIGN.md.
+A change that touches only documentation files is a documentation change: `README.md`, `CLAUDE.md`, every `.md` file under `docs/` (`DESIGN.md`, `REQUIREMENTS.md`, `USER_GUIDE.md`, `RELEASING.md`, `RESULTS.md` and the files under `docs/audits/`), `deploy/ASSETS.md`, `examples/web-app/README.md`, `tools/trace/pending.txt`, files under `.claude/`, and comment and blank lines of Go files under the rules of DESIGN.md (Documentation-only changes). It runs only the private-key scan and the `docs` job: `make trace` and the tests that read these documents (DESIGN.md, Reader set). On a pull request this replaces `check`, `browser`, `ops` and `postgres`; on a push to `main`, merged or pushed directly, it replaces the full checks when the parent commit has a successful `deploy` run, the `deploy` job is skipped and the image is still built. Those tests recompute every `no change since` claim of the release gate. With any other file, or without a successful parent run, every check runs. The list lives in `deploy/ops/changed-files.sh` and DESIGN.md.
 
 ## What the skip trusts
 
@@ -109,7 +109,7 @@ Operators roll back by setting `FEATHERAUTH_TAG` to the previous release and, wh
 
 | # | Item | Requirements | When | Time |
 | --- | --- | --- | --- | --- |
-| 1 | CI of the release commit green (check, browser, ops, Postgres 15 and newest) | every FR and SEC with a test; OPS-03, OPS-07, OPS-09 to OPS-14, OPS-16 to OPS-18; NFR-12 | every release | 1 minute (reads CI) |
+| 1 | CI of the release commit green (check, browser, ops, Postgres 15 and newest; for a documentation change, its scan and docs jobs, and its parent by the same rule) | every FR and SEC with a test; OPS-03, OPS-07, OPS-09 to OPS-14, OPS-16 to OPS-18; NFR-12 | every release | 1 minute (reads CI) |
 | 2 | `tools/trace/pending.txt` empty | every FR and SEC | every release | seconds |
 | 3 | Module list against the Tech stack and `govulncheck`; for the example web app, `npm audit --omit=dev --audit-level=high` and exact versions in its `package.json` | NFR-14, SEC-15 | every release | 3 minutes |
 | 4 | `config check` of the shipped examples and of `RELEASE_CONFIG_DIR`, in the signed commit image | OPS-20 (no unnoticed stricter validation) | every release | 2 minutes |
@@ -125,7 +125,7 @@ Operators roll back by setting `FEATHERAUTH_TAG` to the previous release and, wh
 
 "When its paths changed" uses the shared path list `deploy/release-paths.txt`; this file does not repeat it. A skipped item is recorded as `no change since <commit>`, and a test run by `make check` recomputes every such claim of the release gate and fails when the paths did change. The commit a check is compared with is that of its latest result: the `- Commit:` of the Load or Conformance section for items 7 and 8, of the Browser section for M3 and M4, and of the previous release gate for M5 and M6, but only when that gate's M5 or M6 row was `pass` or `no change since`; otherwise the manual check is required.
 
-The first run of a release ends `not ready`: the rows M1 to M6 of the release gate count only when the section's `- Release:` names the version being prepared (not yet tagged), so the maintainer writes the section with the result lines of `release-out/results.md` and the manual rows, commits it, and runs `make release-check` again, which ends `ready to tag`. The post-tag run (`TAG=vX.Y.Z`) ends `post-tag checks passed`. With no previous release (the first release), item 5 is `not applicable: there is no previous release`, and the two upgrade ops tests of CI skip with `no previous release to upgrade from`; item 6 (the Postgres restore) still runs, with the candidate image only; for a private repository item 12 is `pass` with the detail `gh attestation verify: not applicable (private repository)`; at the first release item 13 is `not applicable` and writes the table of release tags. Set `RELEASE_CONFIG_DIR` to a real configuration directory the maintainers can read (a staging or production copy, no secrets printed); without it, item 4 checks the shipped examples only and the record says so.
+The first run of a release ends `not ready`: the rows M1 to M6 of the release gate count only when the section's `- Release:` names the version being prepared (not yet tagged), so the maintainer writes the section with the result lines of `release-out/results.md` and the manual rows, commits it, and runs `make release-check` again, which ends `ready to tag`. That second run is short: when the commit checked out differs from the gate's `- Commit:` only in documentation files (the same rule as CI, asked of `changed-files.sh`), and the gate's `- Release:` is not yet tagged, it prints a `gate:` line saying so, runs items 1 and 2 for the checked-out commit, checks that rows 1 to 10 and M1 to M6 are filled, none is `fail` and rows 1 and 2 are `pass`, writes only rows 1 and 2 to `release-out/results.md` (nothing to commit), and ends `ready to tag` (or `not ready` naming the rows). In every other case it runs items 1 to 10 in full. The post-tag run (`TAG=vX.Y.Z`) ends `post-tag checks passed`. With no previous release (the first release), item 5 is `not applicable: there is no previous release`, and the two upgrade ops tests of CI skip with `no previous release to upgrade from`; item 6 (the Postgres restore) still runs, with the candidate image only; for a private repository item 12 is `pass` with the detail `gh attestation verify: not applicable (private repository)`; at the first release item 13 is `not applicable` and writes the table of release tags. Set `RELEASE_CONFIG_DIR` to a real configuration directory the maintainers can read (a staging or production copy, no secrets printed); without it, item 4 checks the shipped examples only and the record says so.
 
 ### Manual checks
 
@@ -170,7 +170,7 @@ Not part of a release; done once and kept.
 
 ### Time
 
-A release with no conditional area changed: about 30 minutes of `make release-check` plus 1 to 1.5 hours of M1 and M2. With the load run: add 3.5 hours of machine time. Each conditional manual check adds its time above.
+A release with no conditional area changed: about 30 minutes for the first `make release-check` and about a minute for the second, plus 1 to 1.5 hours of M1 and M2. With the load run: add 3.5 hours of machine time. Each conditional manual check adds its time above.
 
 ## `docs/RESULTS.md`
 
