@@ -1399,12 +1399,13 @@ The commands that open the database (`user`, `session`, `keys sealed`, `keys res
 
 The repository's GitHub Actions show one way to automate deploys. You can adapt it; it is not needed to run FeatherAuth.
 
-- `ci.yml` runs on pull requests: vet, tests and `govulncheck`.
+- `ci.yml` runs on pull requests: vet, tests and `govulncheck` (less for a documentation-only change, see below).
 - `deploy.yml` runs on a push to `main`:
   1. the same checks;
   2. builds the image, tags it with the commit SHA and pushes it to `ghcr.io`;
   3. connects to the host over SSH and runs `deploy/ops/deploy-remote.sh`, which does `docker compose pull && up -d` with the new tag in the deploy directory;
   4. waits up to 30 seconds for `/readyz`, and starts the previous tag again on failure.
+- A change that touches only documentation (the Markdown guides and design files, `tools/trace/pending.txt`, `.claude/`, or only comments in Go files) runs only the scan for private keys and the tests that read those documents, both on a pull request and on a push to `main`. On `main` this holds only when the parent commit's deploy run succeeded; such a push builds and pushes the image but does not deploy it. Every other change runs all the checks.
 - A pushed tag `vX.Y.Z` only builds and publishes the release image, and never deploys.
 - Repository secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` and `DEPLOY_KNOWN_HOSTS` (the host's `known_hosts` line).
 - Repository variables:
