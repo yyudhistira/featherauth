@@ -28,10 +28,14 @@ const (
 )
 
 // The list of the design (CI/CD, "Documentation-only changes"), written out
-// here on purpose: the script must agree with it.
+// here on purpose: the script must agree with it. Every .md file under docs/
+// is in it (today DESIGN.md, REQUIREMENTS.md, USER_GUIDE.md, RELEASING.md,
+// RESULTS.md and the files under docs/audits/).
 var cfDocs = []string{
-	"README.md", "CLAUDE.md", "docs/RELEASING.md",
-	"deploy/ASSETS.md", ".claude/settings.json", ".claude/agents/x.md",
+	"README.md", "CLAUDE.md", "docs/DESIGN.md", "docs/REQUIREMENTS.md", "docs/USER_GUIDE.md",
+	"docs/RELEASING.md", "docs/RESULTS.md", "docs/audits/2026-11-27-audit.md", "docs/PLAN.md",
+	"deploy/ASSETS.md", "examples/web-app/README.md", "tools/trace/pending.txt",
+	".claude/settings.json", ".claude/agents/x.md",
 }
 
 type cfFile struct {
@@ -263,16 +267,14 @@ func runCF(t *testing.T, c cfCase, withOutput bool, args ...string) cfResult {
 	return r
 }
 
-// cfLines is the output of the script: docs_only, then slow_skip.
-func cfLines(docsOnly, slowSkip bool) string {
-	return fmt.Sprintf("docs_only=%v\nslow_skip=%v\n", docsOnly, slowSkip)
+// cfLines is the output of the script: one line, docs_only.
+func cfLines(docsOnly bool) string {
+	return fmt.Sprintf("docs_only=%v\n", docsOnly)
 }
 
-func cfWant(t *testing.T, r cfResult, docsOnly bool) { t.Helper(); cfWant2(t, r, docsOnly, docsOnly) }
-
-func cfWant2(t *testing.T, r cfResult, docsOnly, slowSkip bool) {
+func cfWant(t *testing.T, r cfResult, docsOnly bool) {
 	t.Helper()
-	want := cfLines(docsOnly, slowSkip)
+	want := cfLines(docsOnly)
 	if r.code != 0 {
 		t.Errorf("exit code %d, want 0\n%s", r.code, r.stderr)
 	}
@@ -284,15 +286,12 @@ func cfWant2(t *testing.T, r cfResult, docsOnly, slowSkip bool) {
 	}
 }
 
-// cfRun expects docs_only=want and the same slow_skip (a documentation-only
-// change skips the slow jobs too).
-func cfRun(t *testing.T, c cfCase, want bool) { t.Helper(); cfRun2(t, c, want, want) }
-
-func cfRun2(t *testing.T, c cfCase, docsOnly, slowSkip bool) {
+// cfRun expects exactly the line docs_only=want on stdout and in GITHUB_OUTPUT.
+func cfRun(t *testing.T, c cfCase, want bool) {
 	t.Helper()
 	r := runCF(t, c, true, c.args()...)
-	cfWant2(t, r, docsOnly, slowSkip)
-	if exp := cfLines(docsOnly, slowSkip); r.output != exp {
+	cfWant(t, r, want)
+	if exp := cfLines(want); r.output != exp {
 		t.Errorf("GITHUB_OUTPUT = %q, want exactly %q", r.output, exp)
 	}
 }
@@ -325,23 +324,33 @@ func TestChangedFilesCodeChanges(t *testing.T) {
 		{"go file", cfNames("main.go")},
 		{"one code file among docs", cfNames("README.md", "internal/x/x.go", "CLAUDE.md")},
 		{"code file first", cfNames("main.go", "README.md")},
-		{"design", cfNames("docs/DESIGN.md")},
-		{"requirements (tools/trace reads it)", cfNames("docs/REQUIREMENTS.md")},
-		{"requirements among docs", cfNames("README.md", "docs/REQUIREMENTS.md")},
-		{"results (tests read it)", cfNames("docs/RESULTS.md")},
-		{"results among docs", cfNames("README.md", "docs/RESULTS.md")},
 		{"plan file is not a documentation file", cfNames("PLAN.md")},
 		{"plan file among docs", cfNames("README.md", "PLAN.md")},
-		{"rename from the requirements into the list", []cfFile{{name: "README.md", prev: "docs/REQUIREMENTS.md"}}},
-		{"design among docs", cfNames("README.md", "docs/DESIGN.md")},
-		{"migrate design", cfNames("docs/DESIGN_MIGRATE_EXISTING.md")},
+		{"rename from a code file into docs", []cfFile{{name: "docs/DESIGN.md", prev: "internal/x/x.go"}}},
 		{"readme in a subdirectory", cfNames("sub/README.md")},
 		{"readme with a suffix", cfNames("README.md.bak")},
 		{"readme lower case", cfNames("readme.md")},
-		{"plan in a directory", cfNames("docs/PLAN.md")},
 		{"releasing in the root", cfNames("RELEASING.md")},
+		{"design in the root", cfNames("DESIGN.md")},
 		{"assets elsewhere", cfNames("ASSETS.md")},
 		{"assets in a longer path", cfNames("deploy/ASSETS.md/x")},
+		{"an image under docs/audits", cfNames("docs/audits/x.png")},
+		{"an image under docs", cfNames("docs/assets/icon.png")},
+		{"a non-md file under docs among docs", cfNames("docs/DESIGN.md", "docs/audits/x.png")},
+		{"md upper case under docs", cfNames("docs/x.MD")},
+		{"md with a suffix under docs", cfNames("docs/x.md.bak")},
+		{"md suffix only under docs", cfNames("docs/.md")},
+		{"md file named like the directory", cfNames("docs.md")},
+		{"docs look-alike directory", cfNames("xdocs/a.md")},
+		{"docs nested in another directory", cfNames("sub/docs/a.md")},
+		{"docs upper case", cfNames("DOCS/a.md")},
+		{"md file under deploy", cfNames("deploy/x.md")},
+		{"another file of the example", cfNames("examples/web-app/package.json")},
+		{"the example readme with code of the example", cfNames("examples/web-app/README.md", "examples/web-app/src/main.ts")},
+		{"another readme under examples", cfNames("examples/README.md")},
+		{"a readme deeper in the example", cfNames("examples/web-app/src/README.md")},
+		{"pending with a suffix", cfNames("tools/trace/pending.txt.bak")},
+		{"the trace tool", cfNames("tools/trace/main.go")},
 		{"claude look-alike", cfNames(".claudeX/x")},
 		{"claude file look-alike", cfNames(".claude")},
 		{"claude nested in another directory", cfNames("x/.claude/y")},
@@ -349,6 +358,7 @@ func TestChangedFilesCodeChanges(t *testing.T) {
 		{"claude upper case", cfNames(".CLAUDE/x")},
 		{"newline joins two listed names", cfNames("README.md\nCLAUDE.md")},
 		{"newline hides a code name", cfNames("README.md\nmain.go")},
+		{"newline hides a code name after a docs path", cfNames("docs/a.md\nmain.go")},
 		{"title in a name", cfNames(cfTitle + "/x.go")},
 		{"makefile", cfNames("Makefile")},
 		{"workflow", cfNames(".github/workflows/ci.yml")},
@@ -371,7 +381,12 @@ func TestChangedFilesPreviousNames(t *testing.T) {
 		{"rename inside the list", []cfFile{{name: "README.md", prev: "CLAUDE.md"}}, true},
 		{"rename into the list from a code file", []cfFile{{name: "README.md", prev: "main.go"}}, false},
 		{"rename out of the list into code", []cfFile{{name: "main.go", prev: "README.md"}}, false},
-		{"rename from the design", []cfFile{{name: "docs/RELEASING.md", prev: "docs/DESIGN.md"}}, false},
+		{"rename from the design", []cfFile{{name: "docs/RELEASING.md", prev: "docs/DESIGN.md"}}, true},
+		{"rename from the requirements into the list", []cfFile{{name: "README.md", prev: "docs/REQUIREMENTS.md"}}, true},
+		{"rename into docs/audits", []cfFile{{name: "docs/audits/a.md", prev: "docs/RESULTS.md"}}, true},
+		{"rename of an image into an md file", []cfFile{{name: "docs/audits/a.md", prev: "docs/audits/a.png"}}, false},
+		{"rename of an md file into an image", []cfFile{{name: "docs/audits/a.png", prev: "docs/audits/a.md"}}, false},
+		{"rename of pending.txt", []cfFile{{name: "tools/trace/pending.txt", prev: "tools/trace/old.txt"}}, false},
 		{"rename inside .claude", []cfFile{{name: ".claude/a.md", prev: ".claude/b.md"}}, true},
 		{"rename from a claude look-alike", []cfFile{{name: ".claude/a.md", prev: ".claudeX/a.md"}}, false},
 		{"previous name null", []cfFile{{name: "README.md", prev: ""}}, true},
@@ -530,7 +545,7 @@ func TestChangedFilesWritesNothingWithoutGitHubOutput(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := os.ReadFile(out); string(b) != "a=b\n"+cfLines(true, true) {
+	if b, _ := os.ReadFile(out); string(b) != "a=b\n"+cfLines(true) {
 		t.Errorf("output file = %q", b)
 	}
 }

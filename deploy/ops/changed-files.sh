@@ -4,34 +4,35 @@
 #   sh deploy/ops/changed-files.sh <owner/name> commit <40-hex sha>
 # compare is for a pull request: the files between the two commits of the event
 # (not the pull request's own file list, which GitHub may compute late).
-# Prints exactly two lines, docs_only=<true|false> and slow_skip=<true|false>,
-# and appends them to the file named by $GITHUB_OUTPUT when that is set. It uses
-# `gh api` only (GH_TOKEN comes from the environment).
+# Prints exactly one line, docs_only=<true|false>, and appends it to the file
+# named by $GITHUB_OUTPUT when that is set. It uses `gh api` only (GH_TOKEN comes
+# from the environment).
 #
 # docs_only=true only when the list of changed files is read completely, is not
-# empty, and every file is either in the list below (under its filename and
-# under its previous_filename) or a Go file whose change only adds or removes
-# comments (see comment_only below). The list is documented in docs/DESIGN.md
-# (CI/CD, "Documentation-only changes") and lives only here; a test fails when a
-# Go source, the Makefile or a workflow reads one of these files.
-# slow_skip=true when docs_only is true, and also when every file is in the list
-# or is tools/trace/pending.txt (not renamed): the browser, ops and postgres jobs do not
-# read it, but make trace does, so the check job still runs.
+# empty, and every file is either a documentation file of the list below (under
+# its filename and under its previous_filename) or a Go file whose change only
+# adds or removes comments (see comment_only below). The list is documented in
+# docs/DESIGN.md (CI/CD, "Documentation-only changes") and lives only here; the
+# test TestOnlyTheReaderSetReadsDocumentation fails when it differs from the
+# design, and when a test outside the reader set (the docs job of ci.yml), a
+# tool, the Makefile or a workflow reads one of these files.
 # A Go file with a comment-only patch is also fetched at the head commit and must
 # hold no backquote (see comment_only below); at most 50 such files are fetched,
 # more make the change a code change.
 # GitHub lists at most 3000 files of a comparison and 300 of a commit: at the
 # limit the list may be incomplete, so the answer is false.
-# Every other case gives both false and exit 0: a failing gh, empty or
+# Every other case gives false and exit 0: a failing gh, empty or
 # malformed JSON, an unexpected shape. Nothing from an API answer is evaluated or
 # printed except the final line. Bad usage exits 2 and prints nothing to stdout.
 set -eu
 set -f
 
 # BEGIN list
-pending_file='tools/trace/pending.txt'
-doc_files='README.md CLAUDE.md docs/RELEASING.md deploy/ASSETS.md'
+# doc_files: files by their path; doc_dirs: every file under these directories;
+# doc_md_dirs: every file whose name ends in .md anywhere under these directories.
+doc_files='README.md CLAUDE.md deploy/ASSETS.md examples/web-app/README.md tools/trace/pending.txt'
 doc_dirs='.claude/'
+doc_md_dirs='docs/'
 # END list
 
 usage() {
@@ -79,17 +80,15 @@ esac
 
 finish() {
   echo "docs_only=$1"
-  echo "slow_skip=$2"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     echo "docs_only=$1" >> "$GITHUB_OUTPUT"
-    echo "slow_skip=$2" >> "$GITHUB_OUTPUT"
   fi
   exit 0
 }
 
 no() {
   echo "not documentation-only: $1" >&2
-  finish false false
+  finish false
 }
 
 # One line "#" per file, then the filename and the previous filename (when it is
@@ -169,6 +168,7 @@ out=$(gh api --paginate "$endpoint" \
   --jq '.files | if type == "array" then ('"$names"') else error("not a list") end' 2>/dev/null) ||
   no "the list of changed files is not available"
 
+# A name is a JSON string here: "README.md" with its quotes.
 is_doc() {
   for f in $doc_files; do
     if [ "$1" = "\"$f\"" ]; then return 0; fi
@@ -178,18 +178,19 @@ is_doc() {
       "\"$d"?*'"') return 0 ;;
     esac
   done
+  for d in $doc_md_dirs; do
+    case "$1" in
+      "\"$d"?*'.md"') return 0 ;;
+    esac
+  done
   return 1
 }
 
 # A file is of one class: doc (every name in the list), go (a Go file with a
-# comment-only change), pending (tools/trace/pending.txt alone, under that name,
-# not renamed) or code (anything else). docs_only: no code and no pending file.
-# slow_skip: docs_only, or no code and no go file (so documentation files and the
-# pending file only).
+# comment-only change) or code (anything else). docs_only: no code file.
 count=0
 n_code=0
 n_go=0
-n_pending=0
 go_names=
 nl='
 '
@@ -198,14 +199,11 @@ cur=0 # 1 while a file is being read
 names_n=0
 all_doc=1
 is_go=0
-is_pending=0
 
 flush() {
   [ "$cur" -eq 1 ] || return 0
   if [ "$all_doc" -eq 1 ]; then
     :
-  elif [ "$names_n" -eq 1 ] && [ "$is_pending" -eq 1 ]; then
-    n_pending=$((n_pending + 1))
   elif [ "$is_go" -eq 1 ]; then
     n_go=$((n_go + 1))
     go_names="$go_names$cur_name$nl"
@@ -224,13 +222,11 @@ while IFS= read -r line; do
     names_n=0
     all_doc=1
     is_go=0
-    is_pending=0
   elif [ "$line" = "=go" ]; then
     is_go=1
   else
     names_n=$((names_n + 1))
     if [ "$names_n" -eq 1 ]; then cur_name=$line; fi
-    if [ "$line" = "\"$pending_file\"" ]; then is_pending=1; fi
     if ! is_doc "$line"; then all_doc=0; fi
   fi
 done <<EOF2
@@ -241,7 +237,6 @@ flush
 [ "$count" -gt 0 ] || no "no files listed"
 [ "$count" -lt "$limit" ] || no "the list may be incomplete ($limit files or more)"
 [ "$n_code" -eq 0 ] || no "a file is not in the list"
-[ "$n_go" -eq 0 ] || [ "$n_pending" -eq 0 ] || no "the pending file changed together with a Go file"
 [ "$n_go" -le 50 ] || no "more than 50 Go files would have to be fetched"
 
 # A Go file is clean when its content at the head commit has no backquote. The
@@ -259,12 +254,5 @@ while IFS= read -r g; do
 done <<EOF3
 $go_names
 EOF3
-if [ "$n_pending" -eq 0 ]; then
-  echo "every changed file is in the list or only changes comments" >&2
-  finish true true
-fi
-if [ "$n_go" -eq 0 ]; then
-  echo "only the pending file and documentation files changed" >&2
-  finish false true
-fi
-no "the pending file changed together with a Go file"
+echo "every changed file is in the list or only changes comments" >&2
+finish true

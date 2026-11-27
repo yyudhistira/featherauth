@@ -6,7 +6,8 @@ import (
 	"testing"
 )
 
-// Comment-only Go changes, and a change of tools/trace/pending.txt alone.
+// Comment-only Go changes, and a change of tools/trace/pending.txt, which is a
+// documentation file like the others.
 // The script reads the patch field of the file list. cfPatchFile builds it.
 
 const (
@@ -64,7 +65,8 @@ func TestChangedFilesCommentOnlyGo(t *testing.T) {
 		{"block comment replaced by a block comment", []cfFile{goFile(h, "-/*", "+/* a", "- */", "+ */")}, true},
 		{"code among comment files", []cfFile{goFile(h, "+// a"), cfPatchFile("b.go", h, "+x := 1")}, false},
 		{"comment-only go file and a code file", []cfFile{goFile(h, "+// a"), {name: "main.sh"}}, false},
-		{"comment-only go file and the design", []cfFile{goFile(h, "+// a"), {name: "docs/DESIGN.md"}}, false},
+		{"comment-only go file and the design", []cfFile{goFile(h, "+// a"), {name: "docs/DESIGN.md"}}, true},
+		{"comment-only go file and an image under docs", []cfFile{goFile(h, "+// a"), {name: "docs/audits/x.png"}}, false},
 		{"raw string line", []cfFile{goFile(h, "+// `a")}, false},
 		{"slash slash star is a line comment", []cfFile{goFile(h, "+//* a")}, true},
 
@@ -173,68 +175,76 @@ func TestChangedFilesGoPagination(t *testing.T) {
 	cfRun(t, cfCompare(append(pages, cfJSON(cfN("README.md", 1)...))...), false)
 }
 
+// tools/trace/pending.txt is a documentation file: alone, with other
+// documentation files or with a comment-only Go file, the change is
+// documentation-only; with any other file it is not. There is no separate rule
+// for it any more.
+//
 // Proves OPS-02 (documentation-only changes): see the pass conditions of the row; OPS ids are not traced.
 // Acceptance: Documentation-only changes (part)
-func TestChangedFilesPendingOnly(t *testing.T) {
+func TestChangedFilesPendingIsDocumentation(t *testing.T) {
 	const pending = "tools/trace/pending.txt"
 	pend := cfPatchFile(pending, "@@ -1 +1 @@", "-Release tag", "+Deploy")
 	for _, tc := range []struct {
-		name       string
-		files      []cfFile
-		docs, slow bool
+		name  string
+		files []cfFile
+		docs  bool
 	}{
-		{"alone", []cfFile{pend}, false, true},
-		{"alone without a patch", cfNames(pending), false, true},
-		{"with a documentation file", []cfFile{{name: "README.md"}, pend}, false, true},
-		{"with every kind of documentation file", append(cfNames(cfDocs...), pend), false, true},
-		{"documentation only", cfNames("README.md"), true, true},
-		{"with a code file", []cfFile{pend, {name: "main.go"}}, false, false},
-		{"with the design", []cfFile{pend, {name: "docs/DESIGN.md"}}, false, false},
-		{"with a comment-only go file", []cfFile{pend, goFile(h, "+// a")}, false, false},
-		{"a comment-only go file alone", []cfFile{goFile(h, "+// a")}, true, true},
-		{"with a trace tool file", []cfFile{pend, {name: "tools/trace/main.go"}}, false, false},
-		{"a trace tool file alone", cfNames("tools/trace/main.go"), false, false},
-		{"renamed from another file", []cfFile{{name: pending, prev: "tools/trace/old.txt", raw: `"status":"renamed"`}}, false, false},
-		{"renamed to another file", []cfFile{{name: "tools/trace/old.txt", prev: pending, raw: `"status":"renamed"`}}, false, false},
-		{"in a subdirectory", cfNames("sub/" + pending), false, false},
-		{"with a suffix", cfNames(pending + ".bak"), false, false},
-		{"upper case", cfNames("tools/trace/PENDING.txt"), false, false},
-		{"next to it", cfNames("tools/trace/pending2.txt"), false, false},
-		{"a newline joins it to a documentation file", cfNames("README.md\n" + pending), false, false},
-		{"a newline hides a code file", cfNames(pending + "\nmain.go"), false, false},
-		{"empty list", nil, false, false},
+		{"alone", []cfFile{pend}, true},
+		{"alone without a patch", cfNames(pending), true},
+		{"with a documentation file", []cfFile{{name: "README.md"}, pend}, true},
+		{"with every kind of documentation file", append(cfNames(cfDocs...), pend), true},
+		{"with the design", []cfFile{pend, {name: "docs/DESIGN.md"}}, true},
+		{"with the results", []cfFile{pend, {name: "docs/RESULTS.md"}}, true},
+		{"with a comment-only go file", []cfFile{pend, goFile(h, "+// a")}, true},
+		{"with a code file", []cfFile{pend, {name: "main.go"}}, false},
+		{"with a Go code change", []cfFile{pend, goFile(h, "+x := 1")}, false},
+		{"with a trace tool file", []cfFile{pend, {name: "tools/trace/main.go"}}, false},
+		{"a trace tool file alone", cfNames("tools/trace/main.go"), false},
+		{"renamed from another file", []cfFile{{name: pending, prev: "tools/trace/old.txt", raw: `"status":"renamed"`}}, false},
+		{"renamed to another file", []cfFile{{name: "tools/trace/old.txt", prev: pending, raw: `"status":"renamed"`}}, false},
+		{"in a subdirectory", cfNames("sub/" + pending), false},
+		{"with a suffix", cfNames(pending + ".bak"), false},
+		{"upper case", cfNames("tools/trace/PENDING.txt"), false},
+		{"next to it", cfNames("tools/trace/pending2.txt"), false},
+		{"a newline hides a code file", cfNames(pending + "\nmain.go"), false},
+		{"empty list", nil, false},
 	} {
 		for mode, c := range cfBoth(tc.files) {
-			t.Run(mode+" "+tc.name, func(t *testing.T) { t.Parallel(); cfRun2(t, c, tc.docs, tc.slow) })
+			t.Run(mode+" "+tc.name, func(t *testing.T) { t.Parallel(); cfRun(t, c, tc.docs) })
 		}
 	}
-	// A list that cannot be read or may be incomplete gives false for both.
+	// A list that cannot be read or may be incomplete gives false.
 	for _, body := range []string{"", "garbage", `{"files":null}`, `{"message":"Not Found"}`} {
-		cfRun2(t, cfCase{mode: "commit", pages: []string{body}}, false, false)
+		cfRun(t, cfCase{mode: "commit", pages: []string{body}}, false)
 	}
 	c := cfCompare(cfJSON(pend))
 	c.fail = []int{1}
-	cfRun2(t, c, false, false)
+	cfRun(t, c, false)
 	var pages []string
 	for n := 3000; n > 0; n -= 100 {
 		pages = append(pages, cfJSON(cfN(pending, 100)...))
 	}
-	cfRun2(t, cfCompare(pages...), false, false)
-	cfRun2(t, cfCompare(pages[1:]...), false, true)
+	cfRun(t, cfCompare(pages...), false)
+	cfRun(t, cfCompare(pages[1:]...), true)
 }
 
-// The two outputs are written to GITHUB_OUTPUT and printed, one line each.
+// The script prints one line, docs_only, and writes the same line to
+// GITHUB_OUTPUT: the output slow_skip is gone.
 //
 // Proves OPS-02 (documentation-only changes): see the pass conditions of the row; OPS ids are not traced.
 // Acceptance: Documentation-only changes (part)
-func TestChangedFilesPrintsBothOutputs(t *testing.T) {
-	c := cfCommit(cfJSON(cfNames("tools/trace/pending.txt")...))
-	r := runCF(t, c, true, c.args()...)
-	if want := "docs_only=false\nslow_skip=true\n"; r.stdout != want || r.output != want {
-		t.Errorf("stdout %q, output %q, want both %q", r.stdout, r.output, want)
-	}
-	if strings.Count(r.stdout, "\n") != 2 {
-		t.Errorf("stdout = %q, want exactly two lines", r.stdout)
+func TestChangedFilesPrintsOneOutput(t *testing.T) {
+	for _, files := range [][]cfFile{cfNames("tools/trace/pending.txt"), cfNames("main.go")} {
+		c := cfCommit(cfJSON(files...))
+		r := runCF(t, c, true, c.args()...)
+		want := cfLines(files[0].name != "main.go")
+		if r.stdout != want || r.output != want {
+			t.Errorf("stdout %q, output %q, want both %q", r.stdout, r.output, want)
+		}
+		if strings.Count(r.stdout, "\n") != 1 || strings.Contains(r.stdout+r.output, "slow_skip") {
+			t.Errorf("stdout = %q, want exactly one line and no slow_skip", r.stdout)
+		}
 	}
 }
 
@@ -320,13 +330,14 @@ func TestChangedFilesGoContentsAreFetchedOnlyWhenNeeded(t *testing.T) {
 		{"first file has a backquote, no more fetches", []cfFile{a, b}, map[string]string{"a/a.go": dirty, "b/b.go": clean}, false, []string{"a/a.go"}},
 		{"with documentation", []cfFile{{name: "README.md"}, a}, map[string]string{"a/a.go": clean}, true, []string{"a/a.go"}},
 		{"a patch check failed, no fetch", []cfFile{cfPatchFile("a/a.go", h, "+// Covers: FR-16")}, map[string]string{}, false, nil},
-		{"pending.txt and a clean comment-only file", []cfFile{{name: "tools/trace/pending.txt"}, a}, map[string]string{"a/a.go": clean}, false, nil},
+		{"pending.txt and a clean comment-only file", []cfFile{{name: "tools/trace/pending.txt"}, a}, map[string]string{"a/a.go": clean}, true, []string{"a/a.go"}},
+		{"the design and a Go file with a backquote", []cfFile{{name: "docs/DESIGN.md"}, a}, map[string]string{"a/a.go": dirty}, false, []string{"a/a.go"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := cfCompare(cfJSON(tc.files...))
 			c.contents = tc.contents
 			r := runCF(t, c, true, c.args()...)
-			cfWant2(t, r, tc.want, tc.want)
+			cfWant(t, r, tc.want)
 			var want string
 			for _, f := range tc.fetched {
 				want += "0 repos/" + cfRepo + "/contents/" + f + "?ref=" + cfHead + "\n"

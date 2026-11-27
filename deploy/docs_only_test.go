@@ -1,17 +1,23 @@
 package deploy_test
 
 import (
+	"fmt"
 	"go/ast"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // Documentation-only changes. The tests of the script are in
@@ -55,6 +61,13 @@ func runStep(t *testing.T, run, dir, path string, env ...string) (stdout, stderr
 // Acceptance: Documentation-only changes (part)
 func TestCIChangesJob(t *testing.T) {
 	w, _ := readWorkflow(t, "ci.yml")
+	// deploy.yml calls ci.yml with the boolean input docs_only, false by default.
+	call, _ := w.On["workflow_call"].(map[string]any)
+	inputs, _ := call["inputs"].(map[string]any)
+	in, _ := inputs["docs_only"].(map[string]any)
+	if len(inputs) != 1 || in["type"] != "boolean" || in["default"] != false || in["required"] == true {
+		t.Errorf("workflow_call inputs = %v, want only docs_only: boolean, default false, not required", call["inputs"])
+	}
 	j, ok := w.Jobs["changes"]
 	if !ok {
 		t.Fatal("ci.yml has no changes job")
@@ -79,7 +92,7 @@ func TestCIChangesJob(t *testing.T) {
 	for k, v := range map[string]string{
 		"EVENT": "${{ github.event_name }}", "REPO": "${{ github.repository }}",
 		"BASE": "${{ github.event.pull_request.base.sha }}", "HEAD": "${{ github.event.pull_request.head.sha }}",
-		"GH_TOKEN": "${{ github.token }}",
+		"GH_TOKEN": "${{ github.token }}", "DOCS_ONLY": "${{ inputs.docs_only }}",
 	} {
 		if s.Env[k] != v {
 			t.Errorf("env %s = %q, want %q", k, s.Env[k], v)
@@ -88,47 +101,54 @@ func TestCIChangesJob(t *testing.T) {
 	if strings.Contains(s.Run, "${{") {
 		t.Error("an expression is interpolated inside run:")
 	}
-	for _, o := range []string{"docs_only", "slow_skip"} {
-		if got, want := j.Outputs[o], "${{ steps."+s.ID+".outputs."+o+" }}"; got != want {
-			t.Errorf("output %s = %q, want %q", o, got, want)
-		}
+	if got, want := j.Outputs["docs_only"], "${{ steps."+s.ID+".outputs.docs_only }}"; got != want {
+		t.Errorf("output docs_only = %q, want %q", got, want)
 	}
-	if len(j.Outputs) != 2 {
-		t.Errorf("outputs = %v, want docs_only and slow_skip", j.Outputs)
+	if len(j.Outputs) != 1 {
+		t.Errorf("outputs = %v, want docs_only only (slow_skip is removed)", j.Outputs)
 	}
 
-	// Run the real text. A pull request reads the files in compare mode; any other
-	// event says false and never calls gh.
-	docs := cfCompare(cfJSON(cfNames("README.md")...))
-	code := cfCompare(cfJSON(cfNames("README.md", "main.go")...))
-	pending := cfCompare(cfJSON(cfNames("tools/trace/pending.txt")...))
+	// Run the real text. A pull request reads the files in compare mode and
+	// ignores the input; any other event says what the input says and never
+	// calls gh.
+	compare := "1 repos/owner/name/compare/" + cfBase + "..." + cfHead + "?per_page=100\n"
+	pr := func(names ...string) cfCase { return cfCompare(cfJSON(cfNames(names...)...)) }
+	docs := pr("README.md")
 	comment := cfCompare(cfJSON(goFile(h, "+// a")))
 	contents := "0 repos/owner/name/contents/internal/x/x.go?ref=" + cfHead + "\n"
 	covers := cfCompare(cfJSON(goFile(h, "+// Covers: FR-16")))
 	for _, tc := range []struct {
-		name, event string
-		c           cfCase
-		want        string
-		calls       string
+		name, event, input string
+		c                  cfCase
+		want               bool
+		calls              string
 	}{
-		{"pull request, docs", "pull_request", docs, cfLines(true, true), "1 repos/owner/name/compare/" + cfBase + "..." + cfHead + "?per_page=100\n"},
-		{"pull request, code", "pull_request", code, cfLines(false, false), "1 repos/owner/name/compare/" + cfBase + "..." + cfHead + "?per_page=100\n"},
-		{"pull request, only a Go comment", "pull_request", comment, cfLines(true, true), "1 repos/owner/name/compare/" + cfBase + "..." + cfHead + "?per_page=100\n" + contents},
-		{"pull request, a Covers line", "pull_request", covers, cfLines(false, false), "1 repos/owner/name/compare/" + cfBase + "..." + cfHead + "?per_page=100\n"},
-		{"pull request, only pending.txt", "pull_request", pending, cfLines(false, true), "1 repos/owner/name/compare/" + cfBase + "..." + cfHead + "?per_page=100\n"},
-		{"push", "push", docs, cfLines(false, false), ""},
-		{"called from deploy.yml (push)", "push", docs, cfLines(false, false), ""},
-		{"workflow_dispatch", "workflow_dispatch", docs, cfLines(false, false), ""},
-		{"empty event", "", docs, cfLines(false, false), ""},
+		{"pull request, docs", "pull_request", "", docs, true, compare},
+		{"pull request, code", "pull_request", "", pr("README.md", "main.go"), false, compare},
+		{"pull request, the design", "pull_request", "", pr("docs/DESIGN.md"), true, compare},
+		{"pull request, only a Go comment", "pull_request", "", comment, true, compare + contents},
+		{"pull request, a Covers line", "pull_request", "", covers, false, compare},
+		{"pull request, only pending.txt", "pull_request", "", pr("tools/trace/pending.txt"), true, compare},
+		{"pull request, only the results", "pull_request", "", pr("docs/RESULTS.md"), true, compare},
+		{"pull request, the example readme and the user guide", "pull_request", "", pr("examples/web-app/README.md", "docs/USER_GUIDE.md"), true, compare},
+		{"pull request, an audit", "pull_request", "", pr("docs/audits/2026-11-27.md"), true, compare},
+		{"pull request, an image under docs/audits", "pull_request", "", pr("docs/audits/x.png"), false, compare},
+		{"pull request, the input is not read", "pull_request", "true", pr("main.go"), false, compare},
+		{"push, called without the input", "push", "", docs, false, ""},
+		{"push, called with docs_only false", "push", "false", docs, false, ""},
+		{"push, called with docs_only true", "push", "true", pr("main.go"), true, ""},
+		{"push, an unexpected input", "push", "yes", docs, false, ""},
+		{"workflow_dispatch", "workflow_dispatch", "", docs, false, ""},
+		{"empty event", "", "", docs, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, dir := cfFakeGH(t, tc.c)
-			_, se, out, err := runStep(t, s.Run, "..", path, "EVENT="+tc.event, "REPO=owner/name", "BASE="+cfBase, "HEAD="+cfHead, "GH_TOKEN=x")
+			_, se, out, err := runStep(t, s.Run, "..", path, "EVENT="+tc.event, "REPO=owner/name", "BASE="+cfBase, "HEAD="+cfHead, "GH_TOKEN=x", "DOCS_ONLY="+tc.input)
 			if err != nil {
 				t.Fatalf("%v\n%s", err, se)
 			}
-			if out != tc.want {
-				t.Errorf("GITHUB_OUTPUT = %q, want %q", out, tc.want)
+			if want := cfLines(tc.want); out != want {
+				t.Errorf("GITHUB_OUTPUT = %q, want %q", out, want)
 			}
 			calls, _ := os.ReadFile(filepath.Join(dir, "calls.log"))
 			if string(calls) != tc.calls {
@@ -138,48 +158,53 @@ func TestCIChangesJob(t *testing.T) {
 	}
 }
 
-// check, browser, ops and postgres need changes. check runs unless docs_only is
-// exactly 'true'; browser, ops and postgres run unless docs_only or slow_skip is
-// exactly 'true'
-// (a change of tools/trace/pending.txt alone skips the slow jobs, never check,
-// which runs make trace). A changes job that failed or was cancelled must not
-// skip them: the condition has !cancelled(), so success() is not added
-// implicitly.
+// check, browser, ops and postgres need changes and run unless docs_only is
+// exactly 'true'; docs runs only when it is. A changes job that failed or was
+// cancelled must not skip the tests: their condition has !cancelled(), so
+// success() is not added implicitly, and an empty docs_only runs them and
+// skips docs.
 //
 // Proves OPS-02 (documentation-only changes): see the pass conditions of the row; OPS ids are not traced.
 // Acceptance: Documentation-only changes (part)
 func TestCIJobsSkipOnDocsOnly(t *testing.T) {
 	w, _ := readWorkflow(t, "ci.yml")
-	for _, name := range []string{"check", "browser", "ops", "postgres"} {
+	for _, name := range []string{"check", "browser", "ops", "postgres", "docs"} {
 		j := w.Jobs[name]
 		if !j.needs("changes") {
 			t.Errorf("%s does not need changes", name)
 		}
 		for _, changesRes := range results4 {
 			for _, docs := range []string{"true", "false", "TRUE", "yes", ""} {
-				for _, slow := range []string{"true", "false", "TRUE", "yes", ""} {
-					for _, cancelled := range []bool{false, true} {
-						ctx := exprCtx{
-							runCancelled: cancelled,
-							results:      map[string]string{"changes": changesRes},
-							outputs:      map[string]string{"changes.docs_only": docs, "changes.slow_skip": slow},
-						}
-						got := jobRuns(t, j, []string{"changes"}, ctx)
-						// Skipped only when the flag is 'true' (GitHub compares strings
-						// without case, so 'TRUE' is true too) or the run was cancelled;
-						// a failed, cancelled or skipped changes job runs the tests.
-						want := !cancelled && !strings.EqualFold(docs, "true")
-						if name != "check" {
-							want = want && !strings.EqualFold(slow, "true")
-						}
-						if got != want {
-							t.Errorf("%s runs = %v with changes %s, docs_only %q, slow_skip %q, cancelled %v; want %v",
-								name, got, changesRes, docs, slow, cancelled, want)
-						}
+				for _, cancelled := range []bool{false, true} {
+					ctx := exprCtx{
+						runCancelled: cancelled,
+						results:      map[string]string{"changes": changesRes},
+						outputs:      map[string]string{"changes.docs_only": docs},
+					}
+					got := jobRuns(t, j, []string{"changes"}, ctx)
+					// GitHub compares strings without case, so 'TRUE' is true too.
+					want := !cancelled && !strings.EqualFold(docs, "true")
+					if name == "docs" {
+						want = !cancelled && changesRes == "success" && strings.EqualFold(docs, "true")
+					}
+					if got != want {
+						t.Errorf("%s runs = %v with changes %s, docs_only %q, cancelled %v; want %v",
+							name, got, changesRes, docs, cancelled, want)
 					}
 				}
 			}
 		}
+	}
+	// The named case of the design: a failed changes job gives an empty
+	// docs_only, which runs every test job and skips docs.
+	ctx := exprCtx{results: map[string]string{"changes": "failure"}, outputs: map[string]string{"changes.docs_only": ""}}
+	for _, name := range []string{"check", "browser", "ops", "postgres"} {
+		if !jobRuns(t, w.Jobs[name], []string{"changes"}, ctx) {
+			t.Errorf("%s does not run after a failed changes job", name)
+		}
+	}
+	if jobRuns(t, w.Jobs["docs"], []string{"changes"}, ctx) {
+		t.Error("docs runs after a failed changes job")
 	}
 }
 
@@ -430,10 +455,12 @@ func TestDeployDocsStep(t *testing.T) {
 		{"only a Go comment, parent has no run", "branch", with(func(c *dtCase) { c.files = []cfFile{goFile(h, "+// a")}; c.runs = ttRuns() }), "false", true},
 		{"a Covers line", "branch", with(func(c *dtCase) { c.files = []cfFile{goFile(h, "+// Covers: FR-16")} }), "false", false},
 		{"Go code", "branch", with(func(c *dtCase) { c.files = []cfFile{goFile(h, "+x := 1")} }), "false", false},
-		// pending.txt alone skips only the slow jobs of a pull request; on a push
-		// the checks run.
-		{"only pending.txt", "branch", with(func(c *dtCase) { c.files = cfNames("tools/trace/pending.txt") }), "false", false},
-		{"design", "branch", with(func(c *dtCase) { c.files = cfNames("docs/DESIGN.md") }), "false", false},
+		// pending.txt and every .md file under docs/ are documentation files.
+		{"only pending.txt", "branch", with(func(c *dtCase) { c.files = cfNames("tools/trace/pending.txt") }), "true", true},
+		{"design", "branch", with(func(c *dtCase) { c.files = cfNames("docs/DESIGN.md") }), "true", true},
+		{"the results of a release gate", "branch", with(func(c *dtCase) { c.files = cfNames("docs/RESULTS.md") }), "true", true},
+		{"the results, parent has no run", "branch", with(func(c *dtCase) { c.files = cfNames("docs/RESULTS.md"); c.runs = ttRuns() }), "false", true},
+		{"an image under docs", "branch", with(func(c *dtCase) { c.files = cfNames("docs/audits/x.png") }), "false", false},
 		{"no files", "branch", with(func(c *dtCase) { c.files = nil }), "false", false},
 		{"files not available", "branch", with(func(c *dtCase) { c.failKeys = []string{"commit"} }), "false", false},
 		{"commit garbage", "branch", with(func(c *dtCase) { c.noCommitRaw = "garbage" }), "false", false},
@@ -485,8 +512,9 @@ func TestDeployDocsStep(t *testing.T) {
 	}
 }
 
-// The job output skip is true for a tree match or for a documentation-only
-// commit; docs_only comes from the docs step only.
+// The job output skip is true for a tree match only; docs_only comes from the
+// docs step only, and a documentation-only commit keeps skip false so that the
+// checks job runs ci.yml with docs_only: true.
 //
 // Proves OPS-02 (documentation-only changes): see the pass conditions of the row; OPS ids are not traced.
 // Acceptance: Documentation-only changes (part)
@@ -506,7 +534,7 @@ func TestDeployTestedOutputs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := tree == "true" || docs == "true"; got != want {
+			if want := tree == "true"; got != want {
 				t.Errorf("skip = %v with tree %q, docs %q; want %v", got, tree, docs, want)
 			}
 		}
@@ -521,7 +549,8 @@ func TestDeployTestedOutputs(t *testing.T) {
 		case "${{ steps.tested.outputs.skip == 'true' }}":
 			tree = strings.Contains(s.Run, "same git tree") && strings.Contains(s.Run, "tagged commit")
 		case "${{ steps.docs.outputs.docs_only == 'true' }}":
-			docs = strings.Contains(s.Run, "documentation-only") && strings.Contains(s.Run, "image")
+			docs = strings.Contains(s.Run, "documentation-only") && strings.Contains(s.Run, "docs job") &&
+				strings.Contains(s.Run, "deploy was skipped") && strings.Contains(s.Run, "image is still built")
 		default:
 			t.Errorf("summary step with if %q", s.If)
 		}
@@ -531,24 +560,30 @@ func TestDeployTestedOutputs(t *testing.T) {
 	}
 }
 
-// checks, build and deploy for every combination of what tested says.
+// checks, build and deploy for every combination of what tested says. A
+// documentation-only commit runs the checks job, which calls ci.yml with
+// docs_only: true (the key scan and the docs job), builds the image when they
+// pass and skips the deploy.
 //
 // Proves OPS-02 (documentation-only changes): see the pass conditions of the row; OPS ids are not traced.
 // Acceptance: Documentation-only changes
 func TestDeployJobConditionTable(t *testing.T) {
 	w, _ := readWorkflow(t, "deploy.yml")
 	checks, build, deploy := w.Jobs["checks"], w.Jobs["build"], w.Jobs["deploy"]
+	if len(checks.With) != 1 {
+		t.Errorf("checks with = %v, want docs_only only", checks.With)
+	}
 	// GitHub's implicit success() looks at every ancestor in the needs chain, not
 	// only the direct needs: deploy needs build, build needs checks, so a skipped
 	// checks job skips deploy unless its if: names a status function.
 	deployAncestors := []string{"tested", "build", "checks"}
 	for _, testedRes := range results4 {
-		for _, tree := range []string{"true", "false"} {
-			for _, docs := range []string{"true", "false"} {
-				// What the tested job outputs: skip is true for either reason.
-				skip := "false"
-				if tree == "true" || docs == "true" {
-					skip = "true"
+		for _, skip := range []string{"true", "false", ""} {
+			for _, docs := range []string{"true", "false", "", "TRUE"} {
+				// The input given to ci.yml.
+				ctx := exprCtx{outputs: map[string]string{"tested.skip": skip, "tested.docs_only": docs}}
+				if got, err := evalExpr(checks.With["docs_only"], ctx); err != nil || got != strings.EqualFold(docs, "true") {
+					t.Errorf("checks with docs_only = %v, %v with tested docs_only %q; want %v", got, err, docs, strings.EqualFold(docs, "true"))
 				}
 				for _, checksRes := range results4 {
 					for _, buildRes := range results4 {
@@ -562,16 +597,16 @@ func TestDeployJobConditionTable(t *testing.T) {
 										vals:         map[string]string{"vars.DEPLOY_PATH": deployPath, "github.ref_type": ref},
 									}
 									if got, want := jobRuns(t, checks, []string{"tested"}, ctx), testedRes == "success" && !cancelled && skip != "true"; got != want {
-										t.Errorf("checks runs = %v with tested %s, skip %s; want %v", got, testedRes, skip, want)
+										t.Errorf("checks runs = %v with tested %s, skip %s, docs %s; want %v", got, testedRes, skip, docs, want)
 									}
 									wantBuild := !cancelled && testedRes == "success" &&
 										(checksRes == "success" || (checksRes == "skipped" && skip == "true"))
 									if got := jobRuns(t, build, []string{"tested", "checks"}, ctx); got != wantBuild {
-										t.Errorf("build runs = %v with tested %s, skip %s (tree %s, docs %s), checks %s, cancelled %v; want %v",
-											got, testedRes, skip, tree, docs, checksRes, cancelled, wantBuild)
+										t.Errorf("build runs = %v with tested %s, skip %s, docs %s, checks %s, cancelled %v; want %v",
+											got, testedRes, skip, docs, checksRes, cancelled, wantBuild)
 									}
 									wantDeploy := !cancelled && testedRes == "success" && buildRes == "success" &&
-										deployPath != "" && ref == "branch" && docs != "true"
+										deployPath != "" && ref == "branch" && !strings.EqualFold(docs, "true")
 									if got := jobRuns(t, deploy, deployAncestors, ctx); got != wantDeploy {
 										t.Errorf("deploy runs = %v with tested %s, docs %s, build %s, DEPLOY_PATH %q, %s, cancelled %v; want %v",
 											got, testedRes, docs, buildRes, deployPath, ref, cancelled, wantDeploy)
@@ -584,21 +619,34 @@ func TestDeployJobConditionTable(t *testing.T) {
 			}
 		}
 	}
-	// The named case of the design: a documentation-only commit skips the
-	// checks and the deploy and still builds.
+	// The named case of the design: a documentation-only commit runs the
+	// checks job with docs_only: true, still builds and skips the deploy.
 	ctx := exprCtx{
-		results: map[string]string{"tested": "success", "checks": "skipped", "build": "success"},
-		outputs: map[string]string{"tested.skip": "true", "tested.docs_only": "true"},
+		results: map[string]string{"tested": "success", "checks": "success", "build": "success"},
+		outputs: map[string]string{"tested.skip": "false", "tested.docs_only": "true"},
 		vals:    map[string]string{"vars.DEPLOY_PATH": "/srv/x", "github.ref_type": "branch"},
 	}
-	if jobRuns(t, checks, []string{"tested"}, ctx) {
-		t.Error("checks run for a documentation-only commit")
+	if !jobRuns(t, checks, []string{"tested"}, ctx) {
+		t.Error("checks do not run for a documentation-only commit")
+	}
+	if v, err := evalExpr(checks.With["docs_only"], ctx); err != nil || !v {
+		t.Errorf("checks call ci.yml with docs_only %v, %v for a documentation-only commit; want true", v, err)
 	}
 	if !jobRuns(t, build, []string{"tested", "checks"}, ctx) {
 		t.Error("build does not run for a documentation-only commit")
 	}
 	if jobRuns(t, deploy, deployAncestors, ctx) {
 		t.Error("deploy runs for a documentation-only commit")
+	}
+	// A red docs job (the checks job fails) builds nothing.
+	ctx.results["checks"] = "failure"
+	if jobRuns(t, build, []string{"tested", "checks"}, ctx) {
+		t.Error("build runs although the documentation checks failed")
+	}
+	// A code commit calls ci.yml with docs_only false.
+	ctx.outputs["tested.docs_only"] = "false"
+	if v, err := evalExpr(checks.With["docs_only"], ctx); err != nil || v {
+		t.Errorf("checks call ci.yml with docs_only %v, %v for a code commit; want false", v, err)
 	}
 	// Regression (run 44802697696): the tree was already tested, so checks were
 	// skipped; the deploy must still run.
@@ -631,46 +679,193 @@ func TestExprEvaluatorValues(t *testing.T) {
 	}
 }
 
-// The list of documentation-only files lives only in changed-files.sh. No Go
-// source (string literals only; comments may name the files), no Makefile and
-// no workflow, Dockerfile, .dockerignore, shell script under deploy/ or tools/ and
-// no non-Go file under tools/ (comment lines and trailing comments ignored) may
-// read one of them: a test that reads README.md would not run on a documentation-only
-// change. The files that define or test the list are excluded.
-//
-// Proves OPS-02 (documentation-only changes): see the pass conditions of the row; OPS ids are not traced.
-// Acceptance: Documentation-only changes (part)
-func TestNoCodeReadsADocumentationOnlyFile(t *testing.T) {
-	script := readFile(t, "ops/changed-files.sh")
-	m := regexp.MustCompile(`(?m)^doc_files='([^']*)'\ndoc_dirs='([^']*)'$`).FindStringSubmatch(script)
-	if m == nil {
-		t.Fatal("changed-files.sh has no doc_files and doc_dirs lines")
+// The reader set (DESIGN.md, CI/CD, Reader set), written out here on purpose:
+// the docs job of ci.yml must run exactly this.
+const (
+	readerPattern  = "^(TestConformanceResultsRecordSuiteVersion|TestLoadResultsRecorded|TestReleaseGateNoChangeClaimsHold|TestReleaseCheckBeforeTheTag|TestReleaseCheckAfterTheTag|TestRepositoryHoldsNoSecretFiles|TestConfigReferenceMatchesDesign|TestEveryDocumentedOptionIsReachableFromSnapshot|TestEveryPossibleValueHasARule|TestServerOptionClassesMatchTheDesign|TestProviderOptionsEveryOptionHasAProof|TestSchemaMatchesDesign|TestRunbookCommandsExist|TestRunbookFlagsExistInUsage|TestEmergencyKeyRotationRunbook)$"
+	readerPackages = "./cmd/featherauth/ ./deploy/ ./internal/config/ ./internal/provider/ ./internal/store/"
+)
+
+// The two postgres tests that read docs/DESIGN.md; they need docker and do not
+// run for a documentation change (an accepted risk of the design).
+var acceptedPostgresReaders = map[string]bool{"TestPostgresSchemaMatchesDesign": true, "TestCopyCoversEveryTableOfTheSchema": true}
+
+// The list of documentation files of the design (Documentation-only changes),
+// as the # BEGIN list block of changed-files.sh holds it: files by path, every
+// file under the directories, and every .md file under the md directories.
+var docListWant = map[string]string{
+	"doc_files":   "README.md CLAUDE.md deploy/ASSETS.md examples/web-app/README.md tools/trace/pending.txt",
+	"doc_dirs":    ".claude/",
+	"doc_md_dirs": "docs/",
+}
+
+// Files that name the documentation files only as data for changed-files.sh
+// and the workflows; they are not scanned.
+var readerScanExcluded = map[string]bool{
+	"deploy/changed_files_test.go":    true,
+	"deploy/changed_files_go_test.go": true,
+	"deploy/docs_only_test.go":        true,
+}
+
+// The files outside tests that may name a documentation file: the trace tool
+// (make trace), the script that holds the list, and the release check (make
+// release-check, and in make check only through the release-check tests of
+// the pattern).
+var readerNameAllowed = map[string]bool{
+	"tools/trace/main.go":         true,
+	"deploy/ops/changed-files.sh": true,
+	"deploy/ops/release-check.sh": true,
+}
+
+// docNamer tells whether a text names a documentation file: its path, its base
+// name, or a .md path under docs/.
+type docNamer struct{ names []string }
+
+var docPathRE = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])docs/[^\s"'` + "`" + `]*\.md`)
+
+func newDocNamer(root string) docNamer {
+	n := docNamer{names: []string{"README.md", "CLAUDE.md", "ASSETS.md", "pending.txt", ".claude"}}
+	_ = filepath.WalkDir(filepath.Join(root, "docs"), func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".md") {
+			n.names = append(n.names, d.Name())
+		}
+		return nil
+	})
+	return n
+}
+
+func (n docNamer) hit(s string) string {
+	for _, name := range n.names {
+		if strings.Contains(s, name) {
+			return name
+		}
 	}
-	files, dirs := strings.Fields(m[1]), strings.Fields(m[2])
-	wantFiles := []string{"README.md", "CLAUDE.md", "docs/RELEASING.md", "deploy/ASSETS.md"}
-	if strings.Join(files, " ") != strings.Join(wantFiles, " ") || strings.Join(dirs, " ") != ".claude/" {
-		t.Errorf("the list in changed-files.sh is %v and %v, want the list of docs/DESIGN.md: %v and .claude/", files, dirs, wantFiles)
+	if m := docPathRE.FindString(s); m != "" {
+		return strings.TrimLeft(m, "/\\.\"'")
 	}
-	names := append([]string{}, files...)
-	names = append(names, ".claude")
-	hint := "the list in deploy/ops/changed-files.sh and in docs/DESIGN.md (CI/CD, Documentation-only changes) must change, or the file must not be read"
-	hit := func(s string) string {
-		for _, n := range names {
-			if strings.Contains(s, n) {
-				return n
+	return ""
+}
+
+// readerNode is a top-level function, method, variable or constant of a
+// directory's Go files.
+type readerNode struct {
+	file    string // relative path
+	name    string
+	isTest  bool   // a top-level Test function
+	literal string // the documentation name it holds, "" for none
+	edges   []string
+}
+
+type readerFile struct {
+	rel    string
+	tagged bool // a tagged file; false for a make check file
+}
+
+// The classes of a Go file by its //go:build expression (DESIGN.md, Reader set).
+const (
+	classSkip   = iota // runs only at a release: not scanned
+	classCheck         // a make check file
+	classTagged        // a tagged file (postgres, browser, conformance || load || ops)
+)
+
+// buildClass is the class of a file: a make check file when it has no
+// constraint, or when the expression is true with browser, ops, postgres,
+// manual, conformance and load off and every other tag on (operating system,
+// architecture and Go version tags count as on); otherwise a tagged file when
+// it is true with only manual, conformance and load off; otherwise not scanned.
+func buildClass(f *ast.File) int {
+	for _, cg := range f.Comments {
+		if cg.Pos() > f.Package {
+			break
+		}
+		for _, c := range cg.List {
+			if !constraint.IsGoBuild(c.Text) {
+				continue
+			}
+			expr, err := constraint.Parse(c.Text)
+			if err != nil {
+				return classTagged
+			}
+			off := func(tags ...string) func(string) bool {
+				return func(tag string) bool { return !slices.Contains(tags, tag) }
+			}
+			switch {
+			case expr.Eval(off("browser", "ops", "postgres", "manual", "conformance", "load")):
+				return classCheck
+			case expr.Eval(off("manual", "conformance", "load")):
+				return classTagged
+			}
+			return classSkip
+		}
+	}
+	return classCheck
+}
+
+// readerSetProblems applies the rules of TestOnlyTheReaderSetReadsDocumentation
+// to the tree at root. It returns the problems, the readers it found (file:Test)
+// and the number of files it scanned.
+func readerSetProblems(t *testing.T, root string) (problems, readers []string, scanned int) {
+	t.Helper()
+	namer := newDocNamer(root)
+
+	// (1) The list in changed-files.sh is the list of the design.
+	script, err := os.ReadFile(filepath.Join(root, "deploy/ops/changed-files.sh"))
+	if err != nil {
+		problems = append(problems, "deploy/ops/changed-files.sh: "+err.Error())
+	} else {
+		m := regexp.MustCompile(`(?s)\n# BEGIN list\n(.*?)\n# END list\n`).FindStringSubmatch(string(script))
+		got := map[string]string{}
+		if m != nil {
+			for _, l := range strings.Split(m[1], "\n") {
+				if strings.HasPrefix(strings.TrimSpace(l), "#") {
+					continue
+				}
+				kv := regexp.MustCompile(`^([a-z_]+)='([^']*)'$`).FindStringSubmatch(l)
+				if kv == nil {
+					got["?"] = l
+					continue
+				}
+				got[kv[1]] = strings.Join(strings.Fields(kv[2]), " ")
 			}
 		}
-		return ""
+		if !maps.Equal(got, docListWant) {
+			problems = append(problems, fmt.Sprintf("deploy/ops/changed-files.sh: the # BEGIN list block is %v, want the list of docs/DESIGN.md (Documentation-only changes): %v", got, docListWant))
+		}
 	}
-	root := ".."
-	excluded := map[string]bool{
-		"deploy/changed_files_test.go":    true, // names the list to test the script
-		"deploy/changed_files_go_test.go": true, // the same, for the Go comment and pending.txt cases
-		"deploy/docs_only_test.go":        true, // this test
-		"deploy/ops/changed-files.sh":     true, // holds the list
+
+	// The pattern and the packages of the docs job of ci.yml.
+	var names map[string]bool
+	pkgs := map[string]bool{}
+	var w workflow
+	if b, err := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml")); err != nil {
+		problems = append(problems, ".github/workflows/ci.yml: "+err.Error())
+	} else if err := yaml.Unmarshal(b, &w); err != nil {
+		problems = append(problems, ".github/workflows/ci.yml: "+err.Error())
 	}
-	var scanned int
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	runRE := regexp.MustCompile(`^go test -count=1 -run '\^\(([A-Za-z0-9_|]*)\)\$' (.+)$`)
+	for _, s := range w.Jobs["docs"].Steps {
+		if m := runRE.FindStringSubmatch(strings.TrimSpace(s.Run)); m != nil {
+			names = map[string]bool{}
+			for _, n := range strings.Split(m[1], "|") {
+				names[n] = true
+			}
+			for _, p := range strings.Fields(m[2]) {
+				pkgs[strings.TrimSuffix(strings.TrimPrefix(p, "./"), "/")] = true
+			}
+		}
+	}
+	if names == nil {
+		problems = append(problems, ".github/workflows/ci.yml: the docs job has no step go test -count=1 -run '^(...)$' <packages>")
+	}
+
+	// Walk the tree: Go files by directory, and the other files of rule (4).
+	type dirFiles struct {
+		files []*ast.File
+		info  []readerFile
+	}
+	dirs := map[string]*dirFiles{}
+	fset := token.NewFileSet()
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -682,41 +877,65 @@ func TestNoCodeReadsADocumentationOnlyFile(t *testing.T) {
 			}
 			return nil
 		}
-		if excluded[rel] {
-			return nil
-		}
+		inTestdata := strings.Contains("/"+rel, "/testdata/")
 		switch {
 		case strings.HasSuffix(rel, ".go"):
-			scanned++
-			f, err := parser.ParseFile(token.NewFileSet(), p, nil, parser.SkipObjectResolution)
-			if err != nil {
-				t.Errorf("%s: %v", rel, err)
+			if inTestdata || readerScanExcluded[rel] {
 				return nil
 			}
-			ast.Inspect(f, func(n ast.Node) bool {
-				if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					v, err := strconv.Unquote(lit.Value)
-					if err != nil {
-						v = lit.Value
+			f, err := parser.ParseFile(fset, p, nil, parser.ParseComments|parser.SkipObjectResolution)
+			if err != nil {
+				problems = append(problems, rel+": "+err.Error())
+				return nil
+			}
+			class := buildClass(f)
+			if class == classSkip {
+				return nil
+			}
+			tagged := class == classTagged
+			scanned++
+			dir := filepath.ToSlash(filepath.Dir(rel))
+			if dirs[dir] == nil {
+				dirs[dir] = &dirFiles{}
+			}
+			dirs[dir].files = append(dirs[dir].files, f)
+			dirs[dir].info = append(dirs[dir].info, readerFile{rel: rel, tagged: tagged})
+			// (4) A Go file that is not a test names no documentation file.
+			if !strings.HasSuffix(rel, "_test.go") && !readerNameAllowed[rel] {
+				for _, decl := range f.Decls {
+					where := "at package level"
+					if fd, ok := decl.(*ast.FuncDecl); ok {
+						where = "in " + fd.Name.Name
 					}
-					if h := hit(v); h != "" {
-						t.Errorf("%s reads %q in a string: %s", rel, h, hint)
-					}
+					ast.Inspect(decl, func(n ast.Node) bool {
+						if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+							if v := literalValue(lit); namer.hit(v) != "" {
+								problems = append(problems, fmt.Sprintf("%s:%d: %s names %q: only tests of the reader set and the tools allowed by docs/DESIGN.md (Reader set) may", rel, fset.Position(lit.Pos()).Line, where, v))
+							}
+						}
+						return true
+					})
 				}
-				return true
-			})
-		case rel == "Makefile" || rel == "deploy/Dockerfile" || rel == ".dockerignore" ||
+			}
+		case rel == "Makefile" || strings.HasPrefix(d.Name(), "Dockerfile") ||
 			(strings.HasPrefix(rel, ".github/workflows/") && (strings.HasSuffix(rel, ".yml") || strings.HasSuffix(rel, ".yaml"))) ||
 			((strings.HasPrefix(rel, "deploy/") || strings.HasPrefix(rel, "tools/")) && strings.HasSuffix(rel, ".sh")) ||
-			(strings.HasPrefix(rel, "tools/") && !strings.HasSuffix(rel, ".go") && d.Name() != ".DS_Store"):
+			(strings.HasPrefix(rel, "tools/") && d.Name() != ".DS_Store"):
+			if readerNameAllowed[rel] {
+				return nil
+			}
 			scanned++
-			for i, line := range strings.Split(readFile(t, p), "\n") {
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			for i, line := range strings.Split(string(b), "\n") {
 				if strings.HasPrefix(strings.TrimSpace(line), "#") {
 					continue
 				}
 				code, _, _ := strings.Cut(line, " #")
-				if h := hit(code); h != "" {
-					t.Errorf("%s:%d reads %q: %s", rel, i+1, h, hint)
+				if h := namer.hit(code); h != "" {
+					problems = append(problems, fmt.Sprintf("%s:%d names %q: only the tests and tools of the reader set may read a documentation file (docs/DESIGN.md, Reader set)", rel, i+1, h))
 				}
 			}
 		}
@@ -725,22 +944,368 @@ func TestNoCodeReadsADocumentationOnlyFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scanned < 20 {
-		t.Errorf("only %d files scanned; the walk is wrong", scanned)
-	}
-	// The check itself must see a read: a fabricated source with a literal.
-	f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package x\nvar _ = \"../README.md\"\n", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var seen bool
-	ast.Inspect(f, func(n ast.Node) bool {
-		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && hit(lit.Value) != "" {
-			seen = true
+
+	// (2) and (3), per directory.
+	tests := map[string]bool{} // "dir Name" of every Test in an untagged file
+	for _, dir := range slices.Sorted(maps.Keys(dirs)) {
+		df := dirs[dir]
+		pkgNames := map[string]bool{}
+		for _, f := range df.files {
+			pkgNames[strings.TrimSuffix(f.Name.Name, "_test")] = true
 		}
-		return true
+		nodes := map[string]*readerNode{}
+		add := func(key string, n *readerNode) {
+			if old, ok := nodes[key]; ok { // the same name in two files or two receivers: merge
+				old.edges = append(old.edges, n.edges...)
+				if old.literal == "" {
+					old.literal = n.literal
+				}
+				return
+			}
+			nodes[key] = n
+		}
+		var testNodes []*readerNode
+		var testFiles []readerFile
+		for i, f := range df.files {
+			info := df.info[i]
+			collect := func(root ast.Node, n *readerNode) {
+				sels := map[*ast.Ident]bool{}
+				ast.Inspect(root, func(x ast.Node) bool {
+					switch v := x.(type) {
+					case *ast.BasicLit:
+						if v.Kind == token.STRING && n.literal == "" && namer.hit(literalValue(v)) != "" {
+							n.literal = literalValue(v)
+						}
+					case *ast.SelectorExpr:
+						sels[v.Sel] = true
+						n.edges = append(n.edges, "m:"+v.Sel.Name)
+						if id, ok := v.X.(*ast.Ident); ok && pkgNames[id.Name] {
+							n.edges = append(n.edges, "f:"+v.Sel.Name)
+						}
+					case *ast.Ident:
+						if !sels[v] {
+							n.edges = append(n.edges, "f:"+v.Name)
+						}
+					}
+					return true
+				})
+			}
+			for _, decl := range f.Decls {
+				switch d := decl.(type) {
+				case *ast.FuncDecl:
+					n := &readerNode{file: info.rel, name: d.Name.Name}
+					if d.Body != nil {
+						collect(d.Body, n)
+					}
+					if d.Recv != nil {
+						add("m:"+d.Name.Name, n)
+						continue
+					}
+					n.isTest = strings.HasPrefix(d.Name.Name, "Test")
+					if n.isTest {
+						// A Test function is a node of its own: two files never share one.
+						testNodes = append(testNodes, n)
+						testFiles = append(testFiles, info)
+						if !info.tagged {
+							tests[dir+" "+d.Name.Name] = true
+						}
+						nodes["t:"+info.rel+":"+d.Name.Name] = n
+						continue
+					}
+					add("f:"+d.Name.Name, n)
+				case *ast.GenDecl:
+					for _, spec := range d.Specs {
+						vs, ok := spec.(*ast.ValueSpec)
+						if !ok {
+							continue
+						}
+						for _, id := range vs.Names {
+							n := &readerNode{file: info.rel, name: id.Name}
+							for _, v := range vs.Values {
+								collect(v, n)
+							}
+							add("f:"+id.Name, n)
+						}
+					}
+				}
+			}
+		}
+		for i, tn := range testNodes {
+			// Breadth-first through the functions, methods, variables and
+			// constants it uses.
+			seen := map[*readerNode]bool{tn: true}
+			queue := []*readerNode{tn}
+			var holder *readerNode
+			for len(queue) > 0 && holder == nil {
+				n := queue[0]
+				queue = queue[1:]
+				if n.literal != "" {
+					holder = n
+					break
+				}
+				for _, e := range n.edges {
+					if m, ok := nodes[e]; ok && !seen[m] {
+						seen[m] = true
+						queue = append(queue, m)
+					}
+				}
+			}
+			if holder == nil {
+				continue
+			}
+			info := testFiles[i]
+			readers = append(readers, info.rel+":"+tn.name)
+			via := ""
+			if holder != tn {
+				via = " through " + holder.name + " (" + holder.file + ")"
+			}
+			switch {
+			case info.tagged:
+				if !acceptedPostgresReaders[tn.name] {
+					problems = append(problems, fmt.Sprintf("%s: %s names %q%s in a tagged file: only %s may (docs/DESIGN.md, Reader set)",
+						info.rel, tn.name, holder.literal, via, strings.Join(slices.Sorted(maps.Keys(acceptedPostgresReaders)), " and ")))
+				}
+			case dir == "tools/trace":
+			case names[tn.name] && pkgs[dir]:
+			default:
+				problems = append(problems, fmt.Sprintf("%s: %s names %q%s but is not in the reader set: add it to the -run pattern of the docs job of ci.yml and to docs/DESIGN.md (Reader set), or do not read the file",
+					info.rel, tn.name, holder.literal, via))
+			}
+		}
+	}
+	for _, n := range slices.Sorted(maps.Keys(names)) {
+		found := false
+		for p := range pkgs {
+			found = found || tests[p+" "+n]
+		}
+		if !found {
+			problems = append(problems, fmt.Sprintf(".github/workflows/ci.yml: the -run pattern of the docs job names %s, which is not a Test function in a make check file in one of its packages", n))
+		}
+	}
+	return problems, readers, scanned
+}
+
+func literalValue(lit *ast.BasicLit) string {
+	if v, err := strconv.Unquote(lit.Value); err == nil {
+		return v
+	}
+	return lit.Value
+}
+
+// writeTree writes the files under root.
+func writeTree(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for name, body := range files {
+		p := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// readerFixture is a small tree that passes the guard: a reader in the pattern
+// in each of two packages (one through a helper, one through a constant), the
+// two accepted postgres readers, the trace tool and its test, and comment lines
+// that name documentation files.
+func readerFixture(t *testing.T, script string) map[string]string {
+	t.Helper()
+	return map[string]string{
+		"deploy/ops/changed-files.sh": script,
+		"deploy/ops/release-check.sh": "#!/bin/sh\nawk 1 docs/DESIGN.md\n",
+		".github/workflows/ci.yml": `name: ci
+on:
+  pull_request:
+jobs:
+  docs:
+    runs-on: x
+    steps:
+      - uses: actions/checkout@x
+        with:
+          fetch-depth: 0
+      # make trace reads docs/DESIGN.md
+      - run: make trace
+      - run: go test -count=1 ./tools/trace/
+      - run: go test -count=1 -run '^(TestReadsDesign|TestReadsGuide)$' ./a/ ./b/
+`,
+		"Makefile":                  "# make trace reads docs/DESIGN.md and tools/trace/pending.txt\ntrace:\n\tgo run ./tools/trace # reads README.md\n",
+		"README.md":                 "# Fixture\n",
+		"docs/DESIGN.md":            "# Design\n",
+		"docs/USER_GUIDE.md":        "# Guide\n",
+		"a/a.go":                    "package a\n\n// A is named in README.md.\nfunc A() string { return \"a\" }\n",
+		"a/a_test.go":               "package a\n\nimport \"testing\"\n\nfunc design() string { return \"../docs/DESIGN.md\" }\n\nfunc TestReadsDesign(t *testing.T) { _ = design() }\n\nfunc TestPure(t *testing.T) {}\n",
+		"b/b_test.go":               "package b_test\n\nimport \"testing\"\n\nconst guide = \"../docs/USER_GUIDE.md\"\n\nfunc TestReadsGuide(t *testing.T) { _ = guide }\n",
+		"b/pg_test.go":              "//go:build postgres\n\npackage b_test\n\nimport \"testing\"\n\nfunc TestPostgresSchemaMatchesDesign(t *testing.T) { _ = \"../docs/DESIGN.md\" }\n\nfunc TestCopyCoversEveryTableOfTheSchema(t *testing.T) { _ = design2() }\n\nfunc design2() string { return \"DESIGN.md\" }\n",
+		"tools/trace/main.go":       "package main\n\nvar design = \"docs/DESIGN.md\"\n\nfunc main() { _ = design }\n",
+		"tools/trace/trace_test.go": "package main\n\nimport \"testing\"\n\nfunc TestRealDesign(t *testing.T) { _ = \"../../docs/DESIGN.md\"; _ = \"pending.txt\" }\n",
+		"tools/trace/pending.txt":   "# Entries not yet covered (docs/DESIGN.md).\n",
+	}
+}
+
+// Proves OPS-02 (documentation-only changes): see the pass conditions of the row; OPS ids are not traced.
+// Acceptance: Documentation reader set
+func TestOnlyTheReaderSetReadsDocumentation(t *testing.T) {
+	t.Run("the docs job of ci.yml runs the reader set", func(t *testing.T) {
+		w, _ := readWorkflow(t, "ci.yml")
+		j, ok := w.Jobs["docs"]
+		if !ok {
+			t.Fatal("ci.yml has no docs job")
+		}
+		if !j.needs("changes") || j.RunsOn != runnerExpr {
+			t.Errorf("docs needs %v, runs on %q; want changes and the runner", j.Needs, j.RunsOn)
+		}
+		if len(j.Steps) == 0 || !strings.HasPrefix(j.Steps[0].Uses, "actions/checkout@") ||
+			j.Steps[0].With["fetch-depth"] != "0" || j.Steps[0].With["persist-credentials"] != "false" {
+			t.Fatalf("docs must start with a checkout with fetch-depth: 0 and no persisted credentials: %+v", j.Steps)
+		}
+		var runs []string
+		for _, s := range j.Steps[1:] {
+			switch {
+			case s.Run != "":
+				runs = append(runs, strings.TrimSpace(s.Run))
+			case strings.HasPrefix(s.Uses, "actions/setup-go@") && s.With["go-version-file"] == "go.mod":
+			default:
+				t.Errorf("docs has an unexpected step %+v", s)
+			}
+		}
+		want := []string{"make trace", "go test -count=1 ./tools/trace/", "go test -count=1 -run '" + readerPattern + "' " + readerPackages}
+		if !slices.Equal(runs, want) {
+			t.Errorf("docs runs\n%q\nwant, in order,\n%q", runs, want)
+		}
 	})
-	if !seen {
-		t.Error("the scan does not recognise a string literal naming README.md")
+
+	t.Run("this repository", func(t *testing.T) {
+		problems, readers, scanned := readerSetProblems(t, "..")
+		for _, p := range problems {
+			t.Error(p)
+		}
+		if scanned < 100 {
+			t.Errorf("only %d files scanned; the walk is wrong", scanned)
+		}
+		// The scan must see the readers the design names, or it proves nothing.
+		for _, r := range []string{
+			"deploy/conformance_results_test.go:TestConformanceResultsRecordSuiteVersion",
+			"deploy/release_check_test.go:TestReleaseCheckBeforeTheTag",
+			"internal/store/store_test.go:TestSchemaMatchesDesign",
+			"internal/config/validate_test.go:TestEveryPossibleValueHasARule",
+			"cmd/featherauth/runbook_wiring_test.go:TestRunbookCommandsExist",
+			"internal/store/postgres_test.go:TestPostgresSchemaMatchesDesign",
+			"tools/trace/trace_test.go:TestRealDesign",
+		} {
+			if !slices.Contains(readers, r) {
+				t.Errorf("the scan does not see the reader %s; found %v", r, readers)
+			}
+		}
+	})
+
+	script := readFile(t, "ops/changed-files.sh")
+	t.Run("the fixture passes", func(t *testing.T) {
+		root := t.TempDir()
+		writeTree(t, root, readerFixture(t, script))
+		problems, readers, _ := readerSetProblems(t, root)
+		if len(problems) != 0 {
+			t.Errorf("problems on the clean fixture: %q", problems)
+		}
+		want := []string{"a/a_test.go:TestReadsDesign", "b/b_test.go:TestReadsGuide", "b/pg_test.go:TestCopyCoversEveryTableOfTheSchema", "b/pg_test.go:TestPostgresSchemaMatchesDesign", "tools/trace/trace_test.go:TestRealDesign"}
+		slices.Sort(readers)
+		if !slices.Equal(readers, want) {
+			t.Errorf("readers = %q, want %q", readers, want)
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		change func(files map[string]string)
+		want   []string // substrings of the one problem; nil for none
+	}{
+		{"a new untagged test reading the user guide", func(f map[string]string) {
+			f["a/new_test.go"] = "package a\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestNewReader(t *testing.T) { _, _ = os.ReadFile(\"../docs/USER_GUIDE.md\") }\n"
+		}, []string{"a/new_test.go", "TestNewReader", "docs/USER_GUIDE.md"}},
+		{"an untagged helper called by a test outside the pattern", func(f map[string]string) {
+			f["a/helper_test.go"] = "package a\n\nfunc loadDesign() string { return helperPath() }\n\nfunc helperPath() string { return \"docs/DESIGN.md\" }\n"
+			f["a/uses_test.go"] = "package a\n\nimport \"testing\"\n\nfunc TestUsesHelper(t *testing.T) { _ = loadDesign() }\n"
+		}, []string{"a/uses_test.go", "TestUsesHelper", "helperPath"}},
+		{"a method that reads, called by a test outside the pattern", func(f map[string]string) {
+			f["a/env_test.go"] = "package a\n\nimport \"testing\"\n\ntype env struct{}\n\nfunc (env) results() string { return \"../docs/RESULTS.md\" }\n\nfunc TestEnv(t *testing.T) { var e env; _ = e.results() }\n"
+			f["docs/RESULTS.md"] = "# Results\n"
+		}, []string{"a/env_test.go", "TestEnv", "RESULTS.md"}},
+		{"a browser-tagged reader", func(f map[string]string) {
+			f["a/b_browser_test.go"] = "//go:build browser\n\npackage a\n\nimport \"testing\"\n\nfunc TestBrowserReads(t *testing.T) { _ = \"../README.md\" }\n"
+		}, []string{"a/b_browser_test.go", "TestBrowserReads", "tagged file"}},
+		{"an ops-tagged reader", func(f map[string]string) {
+			f["a/o_test.go"] = "//go:build ops\n\npackage a\n\nimport \"testing\"\n\nfunc TestOpsReads(t *testing.T) { _ = \".claude/settings.json\" }\n"
+		}, []string{"a/o_test.go", "TestOpsReads"}},
+		{"a third postgres-tagged reader", func(f map[string]string) {
+			f["b/pg2_test.go"] = "//go:build postgres\n\npackage b_test\n\nimport \"testing\"\n\nfunc TestPostgresThird(t *testing.T) { _ = design2() }\n"
+		}, []string{"b/pg2_test.go", "TestPostgresThird", "design2"}},
+		{"a package-level constant used by a test outside the pattern", func(f map[string]string) {
+			f["b/const_test.go"] = "package b_test\n\nimport \"testing\"\n\nconst resultsPath = \"../docs/RESULTS.md\"\n\nfunc TestUsesConst(t *testing.T) { _ = resultsPath }\n"
+		}, []string{"b/const_test.go", "TestUsesConst", "resultsPath", "docs/RESULTS.md"}},
+		{"a reader outside the pattern in a !postgres file", func(f map[string]string) {
+			f["a/np_test.go"] = "//go:build !postgres\n\npackage a\n\nimport \"testing\"\n\nfunc TestNoPostgresReads(t *testing.T) { _ = \"../docs/DESIGN.md\" }\n"
+		}, []string{"a/np_test.go", "TestNoPostgresReads", "not in the reader set"}},
+		{"a reader outside the pattern in a file limited to operating systems", func(f map[string]string) {
+			f["a/os_test.go"] = "//go:build darwin || linux\n\npackage a\n\nimport \"testing\"\n\nfunc TestOSReads(t *testing.T) { _ = \"../docs/DESIGN.md\" }\n"
+		}, []string{"a/os_test.go", "TestOSReads", "not in the reader set"}},
+		{"a reader in a conformance, load or ops file", func(f map[string]string) {
+			f["a/clo_test.go"] = "//go:build conformance || load || ops\n\npackage a\n\nimport \"testing\"\n\nfunc TestCLOReads(t *testing.T) { _ = \"../docs/RESULTS.md\" }\n"
+		}, []string{"a/clo_test.go", "TestCLOReads", "tagged file"}},
+		{"a Dockerfile naming README.md", func(f map[string]string) {
+			f["deploy/Dockerfile"] = "# the image\nFROM scratch\nCOPY README.md /README.md\n"
+		}, []string{"deploy/Dockerfile:3", "README.md"}},
+		{"a Dockerfile variant naming CLAUDE.md", func(f map[string]string) {
+			f["Dockerfile.dev"] = "FROM scratch\nCOPY CLAUDE.md /x\n"
+		}, []string{"Dockerfile.dev:2", "CLAUDE.md"}},
+		{"a load-tagged reader is not scanned", func(f map[string]string) {
+			f["a/l_test.go"] = "//go:build load\n\npackage a\n\nimport \"testing\"\n\nfunc TestLoadReads(t *testing.T) { _ = \"../docs/RESULTS.md\" }\n"
+		}, nil},
+		{"a reader in a package outside the step", func(f map[string]string) {
+			f["c/c_test.go"] = "package c\n\nimport \"testing\"\n\nfunc TestReadsDesign(t *testing.T) { _ = \"../docs/DESIGN.md\" }\n"
+		}, []string{"c/c_test.go", "TestReadsDesign"}},
+		{"a pattern naming a test that does not exist", func(f map[string]string) {
+			f[".github/workflows/ci.yml"] = strings.Replace(f[".github/workflows/ci.yml"], "TestReadsGuide)", "TestReadsGuide|TestMissing)", 1)
+		}, []string{"ci.yml", "TestMissing"}},
+		{"a pattern naming a tagged test", func(f map[string]string) {
+			f[".github/workflows/ci.yml"] = strings.Replace(f[".github/workflows/ci.yml"], "TestReadsGuide)", "TestReadsGuide|TestPostgresSchemaMatchesDesign)", 1)
+		}, []string{"ci.yml", "TestPostgresSchemaMatchesDesign"}},
+		{"a list in changed-files.sh that differs", func(f map[string]string) {
+			f["deploy/ops/changed-files.sh"] = strings.Replace(f["deploy/ops/changed-files.sh"], "CLAUDE.md ", "", 1)
+		}, []string{"deploy/ops/changed-files.sh", "# BEGIN list"}},
+		{"a Makefile recipe naming README.md", func(f map[string]string) {
+			f["Makefile"] += "readme:\n\tcat README.md\n"
+		}, []string{"Makefile:5", "README.md"}},
+		{"a workflow step naming README.md", func(f map[string]string) {
+			f[".github/workflows/other.yml"] = "jobs:\n  x:\n    steps:\n      - run: cat README.md\n"
+		}, []string{".github/workflows/other.yml:4", "README.md"}},
+		{"a script under deploy naming pending.txt", func(f map[string]string) {
+			f["deploy/ops/x.sh"] = "#!/bin/sh\n# reads nothing\ncat tools/trace/pending.txt\n"
+		}, []string{"deploy/ops/x.sh:3", "pending.txt"}},
+		{"a non-test Go file naming README.md", func(f map[string]string) {
+			f["a/a.go"] = "package a\n\n// A is named in README.md.\nfunc A() string { return \"../README.md\" }\n"
+		}, []string{"a/a.go:4", "in A", "README.md"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := readerFixture(t, script)
+			tc.change(files)
+			root := t.TempDir()
+			writeTree(t, root, files)
+			problems, _, _ := readerSetProblems(t, root)
+			if tc.want == nil {
+				if len(problems) != 0 {
+					t.Errorf("problems = %q, want none", problems)
+				}
+				return
+			}
+			if len(problems) != 1 {
+				t.Fatalf("problems = %q, want exactly one naming %q", problems, tc.want)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(problems[0], w) {
+					t.Errorf("the problem %q does not name %q", problems[0], w)
+				}
+			}
+		})
 	}
 }

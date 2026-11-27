@@ -32,6 +32,7 @@ const (
 
 type workflowJob struct {
 	Uses        string            `yaml:"uses"`
+	With        map[string]string `yaml:"with"`
 	If          string            `yaml:"if"`
 	Concurrency any               `yaml:"concurrency"`
 	Needs       any               `yaml:"needs"`
@@ -1002,9 +1003,9 @@ func TestDeployTestedJob(t *testing.T) {
 	if s.ID == "" || s.If != "" || s.ContinueOnError {
 		t.Errorf("the script step needs an id, no if and no continue-on-error: %+v", s)
 	}
-	// Skip is true for the tree match (the tree check) or for a documentation-only
-	// commit (the docs step); proved by TestDeployTestedOutputs.
-	if got, want := j.Outputs["skip"], "${{ steps."+s.ID+".outputs.skip == 'true' || steps.docs.outputs.docs_only == 'true' }}"; got != want {
+	// Skip is true for the tree match only; a documentation-only commit sets
+	// docs_only and keeps skip false (TestDeployTestedOutputs).
+	if got, want := j.Outputs["skip"], "${{ steps."+s.ID+".outputs.skip == 'true' }}"; got != want {
 		t.Errorf("tested output skip = %q, want %q", got, want)
 	}
 	// The summary line is written only when skipping.

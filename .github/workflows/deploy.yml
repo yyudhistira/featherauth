@@ -20,13 +20,15 @@ name: deploy
 # release tag when the tagged commit already has a successful deploy.yml run for
 # a push to main. In every other case, and on any error, the checks run.
 #
-# The checks and the deploy are also skipped for a documentation-only commit (or
-# one that only changes comments of Go files) pushed to a branch
-# (deploy/ops/changed-files.sh, the "docs" step of the tested job),
-# but only when its parent commit already has a successful deploy.yml run for a
-# push to main (the tag lookup of deploy/ops/tested-tree.sh): a documentation
-# commit never makes an untested commit look tested. The image is still built, so
-# every commit of main has one; it is not deployed. A tag is never documentation-only.
+# A documentation-only commit (or one that only changes comments of Go files)
+# pushed to a branch (deploy/ops/changed-files.sh, the "docs" step of the tested
+# job) runs only the documentation checks: the checks job calls ci.yml with
+# docs_only: true (the key scan and the docs job, the tests that read the
+# documents), and the deploy is skipped. This holds only when its parent commit
+# already has a successful deploy.yml run for a push to main (the tag lookup of
+# deploy/ops/tested-tree.sh): a documentation commit never makes an untested
+# commit look tested. The image is still built, so every commit of main has
+# one; it is not deployed. A tag is never documentation-only.
 #
 # A pushed tag vMAJOR.MINOR.PATCH (digits only) runs the checks (unless they
 # already passed on main, see above), then builds the image with VERSION set to
@@ -49,8 +51,8 @@ concurrency:
 jobs:
   # Decides whether the checks may be skipped. The scripts print true only for the
   # cases above; they never fail on a GitHub API error (false). skip is true for a
-  # tree match or a documentation-only commit; docs_only is true for the latter
-  # only, and also stops the deploy.
+  # tree match only; docs_only is true for a documentation-only commit, which
+  # runs the documentation checks only and stops the deploy.
   tested:
     runs-on: ${{ vars.RUNNER || 'ubuntu-24.04' }}
     permissions:
@@ -59,7 +61,7 @@ jobs:
       statuses: read
       actions: read
     outputs:
-      skip: ${{ steps.tested.outputs.skip == 'true' || steps.docs.outputs.docs_only == 'true' }}
+      skip: ${{ steps.tested.outputs.skip == 'true' }}
       docs_only: ${{ steps.docs.outputs.docs_only }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -115,7 +117,7 @@ jobs:
       - name: Say that the commit is documentation-only
         if: ${{ steps.docs.outputs.docs_only == 'true' }}
         run: |
-          echo "The checks and the deploy were skipped: this is a documentation-only commit and its parent already passed on main. The image is still built." >> "$GITHUB_STEP_SUMMARY"
+          echo "This is a documentation-only commit and its parent already passed on main: the checks run only the key scan and the docs job, the deploy was skipped, and the image is still built." >> "$GITHUB_STEP_SUMMARY"
 
   checks:
     # A called workflow cannot request more permissions than its caller grants,
@@ -131,6 +133,8 @@ jobs:
     needs: tested
     if: ${{ needs.tested.outputs.skip != 'true' }}
     uses: ./.github/workflows/ci.yml
+    with:
+      docs_only: ${{ needs.tested.outputs.docs_only == 'true' }}
 
   # Runs when the checks passed, or when they were skipped because tested said so;
   # never when they failed or were cancelled.

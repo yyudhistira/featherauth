@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -79,6 +80,9 @@ func newRCEnv(t *testing.T) *rcEnv {
 	e := &rcEnv{t: t, repo: t.TempDir(), remote: t.TempDir(), stub: t.TempDir()}
 	e.out = filepath.Join(t.TempDir(), "release-out")
 	rcCopy(t, "ops/release-check.sh", filepath.Join(e.repo, "deploy/ops/release-check.sh"))
+	// The real script: the short path asks it whether the change since the
+	// gate's commit is a documentation change, through the fake gh below.
+	rcCopy(t, "ops/changed-files.sh", filepath.Join(e.repo, "deploy/ops/changed-files.sh"))
 	rcCopy(t, "release-paths.txt", filepath.Join(e.repo, "deploy/release-paths.txt"))
 	rcCopy(t, "../go.mod", filepath.Join(e.repo, "go.mod"))
 	rcCopy(t, "../docs/DESIGN.md", filepath.Join(e.repo, "docs/DESIGN.md"))
@@ -122,7 +126,9 @@ d="`+d+`"
 echo "gh $*" >> "$d/calls.log"
 if [ "$1" = attestation ]; then [ ! -e "$d/attest.fail" ]; exit $?; fi
 [ "$1" = api ] || exit 64
-ep=$2; shift 2
+shift
+[ "$1" != --paginate ] || shift
+ep=$1; shift
 expr=
 while [ $# -gt 0 ]; do case $1 in --jq) expr=$2; shift ;; esac; shift; done
 case "$ep" in
@@ -131,6 +137,7 @@ case "$ep" in
   repos/*/actions/workflows/ci.yml/runs*) k=ci_runs ;;
   repos/*/actions/runs/*/jobs*) id=${ep#repos/*/actions/runs/}; k=jobs-${id%%/*} ;;
   repos/*/commits/*/pulls*) k=pulls ;;
+  repos/*/compare/*) k=compare ;;
   users/*/packages/*) k=versions ;;
   repos/*/*) k=repo ;;
   *) echo "fake gh: unknown endpoint $ep" >&2; exit 64 ;;
@@ -280,8 +287,83 @@ func (e *rcEnv) changeCode() {
 	e.defaults() // digests for the new commit
 }
 
+// commit writes a file, commits it and moves HEAD; it returns the new commit.
+func (e *rcEnv) commit(path, body, msg string) string {
+	e.t.Helper()
+	rcWrite(e.t, filepath.Join(e.repo, path), body)
+	rcGit(e.t, e.repo, "add", ".")
+	rcGit(e.t, e.repo, "commit", "-qm", msg)
+	e.head = rcGit(e.t, e.repo, "rev-parse", "HEAD")
+	return e.head
+}
+
+// rcRun is one deploy run of a push to main: its id, commit and jobs.
+type rcRun struct {
+	id   int
+	sha  string
+	jobs string
+}
+
+// runs answers the deploy runs and their jobs.
+func (e *rcEnv) runs(rs ...rcRun) {
+	var ws []string
+	for _, r := range rs {
+		ws = append(ws, fmt.Sprintf(`{"id":%d,"head_branch":"main","head_sha":%q,"conclusion":"success"}`, r.id, r.sha))
+		e.set(fmt.Sprintf("jobs-%d.json", r.id), r.jobs)
+	}
+	e.set("deploy_runs.json", `{"workflow_runs":[`+strings.Join(ws, ",")+`]}`)
+}
+
+// The jobs of a deploy run whose checks ran in full, and of a documentation
+// change (Documentation-only changes: ci.yml called with docs_only: true).
+var (
+	rcFullJobs = rcJobs("tested", "success", "checks / changes", "success", "checks / scan", "success", "checks / check", "success",
+		"checks / browser", "success", "checks / ops", "success", "checks / postgres (15)", "success", "checks / postgres (18)", "success",
+		"checks / docs", "skipped", "build", "success", "deploy", "success")
+	rcDocsJobs = rcJobs("tested", "success", "checks / changes", "success", "checks / scan", "success", "checks / docs", "success",
+		"checks / check", "skipped", "checks / browser", "skipped", "checks / ops", "skipped", "checks / postgres", "skipped",
+		"build", "success", "deploy", "skipped")
+)
+
+// rcGateRows are the rows 1 to 10 of a release gate, all pass.
+const rcGateRows = "| 1 | pass | d |\n| 2 | pass | d |\n| 3 | pass | d |\n| 4 | pass | d |\n| 5 | not applicable: there is no previous release | d |\n" +
+	"| 6 | pass | d |\n| 7 | no change since x | d |\n| 8 | no change since x | d |\n| 9 | pass | d |\n| 10 | pass | d |\n"
+
+// gateCommit makes the release gate commit of the short path: the commit the
+// first run of the release check ran on is the current HEAD (its deploy run is
+// green in full), and the new HEAD adds the gate section naming it. rows
+// replaces the rows of the gate. It returns the commit the gate names.
+func (e *rcEnv) gateCommit(rows string) string {
+	e.t.Helper()
+	checked := e.head
+	e.commit("docs/RESULTS.md", rcResults(e.c1, checked, rows, "| v0.1.0 | "+e.c1+" | "+rcDigestO+" |\n"), "release gate")
+	e.defaults()
+	e.runs(rcRun{100, checked, rcFullJobs}, rcRun{101, e.head, rcDocsJobs})
+	e.set("compare.json", `{"files":[{"filename":"docs/RESULTS.md","status":"modified"}]}`)
+	return checked
+}
+
+// rcNoItemAfter2 fails when an item after 2 ran or a fake of items 3 to 10 was called.
+func (e *rcEnv) noItemAfter2(lines []string) {
+	e.t.Helper()
+	for _, l := range lines {
+		var m int
+		if _, err := fmt.Sscanf(l, "item %d:", &m); err == nil && m > 2 {
+			e.t.Errorf("item %d ran on the short path:\n%s", m, strings.Join(lines, "\n"))
+		}
+	}
+	for _, l := range strings.Split(e.calls(), "\n") {
+		for _, tool := range []string{"go ", "make ", "cosign ", "docker ", "npm "} {
+			if strings.HasPrefix(l, tool) {
+				e.t.Errorf("the short path called %q", l)
+			}
+		}
+	}
+}
+
 // Covers: SEC-42
 // Acceptance: Release check before the tag
+// Acceptance: Release check of a documentation commit
 // Also proves OPS-01, OPS-02, OPS-20, NFR-13, NFR-14 (not traced).
 func TestReleaseCheckBeforeTheTag(t *testing.T) {
 	t.Run("a good commit passes every item in order and is ready to tag", func(t *testing.T) {
@@ -592,6 +674,234 @@ func TestReleaseCheckBeforeTheTag(t *testing.T) {
 			t.Fatalf("a config check warning was not recorded:\n%s", results)
 		}
 	})
+
+	t.Run("item 1 accepts a documentation run whose parent passed", func(t *testing.T) {
+		e := newRCEnv(t)
+		parent := e.head
+		e.commit("README.md", "# docs\n", "docs")
+		e.defaults()
+		e.runs(rcRun{100, parent, rcFullJobs}, rcRun{101, e.head, rcDocsJobs})
+		lines, results, _ := e.run()
+		if !rcHas(lines, "item 1: CI of the commit: pass") || !strings.Contains(results, "deploy run 101") || !strings.Contains(results, "deploy run 100") || !strings.Contains(results, parent) {
+			t.Fatalf("%s\n%s", strings.Join(lines, "\n"), results)
+		}
+	})
+
+	t.Run("item 1 follows a parent that is itself a documentation run", func(t *testing.T) {
+		e := newRCEnv(t)
+		grand := e.head
+		parent := e.commit("README.md", "# docs 1\n", "docs 1")
+		e.commit("CLAUDE.md", "# docs 2\n", "docs 2")
+		e.defaults()
+		e.runs(rcRun{100, grand, rcFullJobs}, rcRun{101, parent, rcDocsJobs}, rcRun{102, e.head, rcDocsJobs})
+		lines, results, _ := e.run()
+		if !rcHas(lines, "item 1: CI of the commit: pass") {
+			t.Fatalf("%s\n%s", strings.Join(lines, "\n"), results)
+		}
+		for _, want := range []string{"deploy run 102", "deploy run 101", "deploy run 100", parent, grand} {
+			if !strings.Contains(results, want) {
+				t.Errorf("item 1 does not name %s:\n%s", want, results)
+			}
+		}
+	})
+
+	for _, c := range []struct {
+		name  string
+		setup func(e *rcEnv)
+		why   string
+	}{
+		{"a documentation run with a red docs job", func(e *rcEnv) {
+			parent := e.head
+			e.commit("README.md", "# docs\n", "docs")
+			e.defaults()
+			e.runs(rcRun{100, parent, rcFullJobs}, rcRun{101, e.head, rcJobs("checks / scan", "success", "checks / docs", "failure", "checks / check", "skipped")})
+		}, "docs=failure"},
+		{"a documentation run with a red scan job", func(e *rcEnv) {
+			parent := e.head
+			e.commit("README.md", "# docs\n", "docs")
+			e.defaults()
+			e.runs(rcRun{100, parent, rcFullJobs}, rcRun{101, e.head, rcJobs("checks / scan", "failure", "checks / docs", "success", "checks / check", "skipped")})
+		}, "scan=failure"},
+		{"a documentation run whose parent is red", func(e *rcEnv) {
+			parent := e.head
+			e.commit("README.md", "# docs\n", "docs")
+			e.defaults()
+			e.runs(rcRun{101, e.head, rcDocsJobs})
+			e.set("deploy_runs.json", `{"workflow_runs":[{"id":100,"head_branch":"main","head_sha":"`+parent+`","conclusion":"failure"},{"id":101,"head_branch":"main","head_sha":"`+e.head+`","conclusion":"success"}]}`)
+			e.set("jobs-100.json", rcFullJobs)
+		}, "concluded failure"},
+		{"a documentation run whose parent has no run", func(e *rcEnv) {
+			e.commit("README.md", "# docs\n", "docs")
+			e.defaults()
+			e.runs(rcRun{101, e.head, rcDocsJobs})
+		}, "no deploy run"},
+		{"a chain of 21 documentation commits", func(e *rcEnv) {
+			rs := []rcRun{{100, e.head, rcFullJobs}}
+			for i := range 21 {
+				e.commit("README.md", fmt.Sprintf("# docs %d\n", i), "docs")
+				rs = append(rs, rcRun{101 + i, e.head, rcDocsJobs})
+			}
+			e.defaults()
+			e.runs(rs...)
+		}, "more than 20 documentation-only commits"},
+	} {
+		t.Run("item 1 fails on "+c.name, func(t *testing.T) {
+			e := newRCEnv(t)
+			c.setup(e)
+			lines, _, code := e.run()
+			last := rcLast(lines)
+			if code == 0 || !rcHas(lines, "item 1: CI of the commit: fail") || !strings.HasPrefix(last, "not ready: item 1") || !strings.Contains(last, c.why) {
+				t.Fatalf("exit %d, want item 1 to fail with %q:\n%s", code, c.why, strings.Join(lines, "\n"))
+			}
+		})
+	}
+
+	t.Run("item 1 accepts a chain of 20 documentation commits", func(t *testing.T) {
+		e := newRCEnv(t)
+		rs := []rcRun{{100, e.head, rcFullJobs}}
+		for i := range 20 {
+			e.commit("README.md", fmt.Sprintf("# docs %d\n", i), "docs")
+			rs = append(rs, rcRun{101 + i, e.head, rcDocsJobs})
+		}
+		e.defaults()
+		e.runs(rs...)
+		lines, _, _ := e.run()
+		if !rcHas(lines, "item 1: CI of the commit: pass") {
+			t.Fatalf("%s", strings.Join(lines, "\n"))
+		}
+	})
+
+	t.Run("the gate commit takes the short path and is ready to tag", func(t *testing.T) {
+		e := newRCEnv(t)
+		checked := e.gateCommit(rcGateRows + rcManualDone)
+		lines, results, code := e.run()
+		if code != 0 || rcLast(lines) != "ready to tag" {
+			t.Fatalf("exit %d:\n%s", code, strings.Join(lines, "\n"))
+		}
+		want := []string{
+			"gate: HEAD " + e.head + " differs from " + checked + " only in documentation files: items 3 to 10 as recorded in the release gate of v0.3.0",
+			"item 1: CI of the commit: pass", "item 2: pending.txt: pass", "ready to tag",
+		}
+		if !slices.Equal(lines, want) {
+			t.Errorf("output\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
+		}
+		e.noItemAfter2(lines)
+		rows := strings.Split(strings.TrimRight(results, "\n"), "\n")
+		if len(rows) != 2 || !strings.HasPrefix(rows[0], "| 1 | pass | ") || !strings.HasPrefix(rows[1], "| 2 | pass | ") {
+			t.Errorf("results.md holds\n%s\nwant only the rows of items 1 and 2", results)
+		}
+		if !strings.Contains(rows[0], "deploy run 101") || !strings.Contains(rows[0], "deploy run 100") {
+			t.Errorf("row 1 does not name both runs: %s", rows[0])
+		}
+		if c := e.calls(); !strings.Contains(c, " repos/"+rcSlug+"/compare/"+checked+"..."+e.head+"?per_page=100 ") {
+			t.Errorf("changed-files.sh was not asked about the change from the gate's commit:\n%s", c)
+		}
+	})
+
+	t.Run("the short path stops at item 2 for an entry in pending.txt", func(t *testing.T) {
+		e := newRCEnv(t)
+		e.gateCommit(rcGateRows + rcManualDone)
+		// The same commit also adds an entry: a documentation change still.
+		rcWrite(t, filepath.Join(e.repo, "tools/trace/pending.txt"), "# c\nSEC-99\n")
+		rcGit(t, e.repo, "commit", "-q", "--amend", "-a", "--no-edit")
+		e.head = rcGit(t, e.repo, "rev-parse", "HEAD")
+		e.set("compare.json", `{"files":[{"filename":"docs/RESULTS.md","status":"modified"},{"filename":"tools/trace/pending.txt","status":"modified"}]}`)
+		checked := strings.TrimSpace(strings.SplitN(rcGit(t, e.repo, "rev-parse", "HEAD^"), "\n", 2)[0])
+		e.runs(rcRun{100, checked, rcFullJobs}, rcRun{101, e.head, rcDocsJobs})
+		lines, _, code := e.run()
+		if code == 0 || !rcHas(lines, "gate: HEAD ") || !rcHas(lines, "item 2: pending.txt: fail") || !strings.Contains(rcLast(lines), "SEC-99") {
+			t.Fatalf("exit %d:\n%s", code, strings.Join(lines, "\n"))
+		}
+		e.noItemAfter2(lines)
+	})
+
+	for _, c := range []struct {
+		name    string
+		setup   func(e *rcEnv)
+		compare bool // whether changed-files.sh is asked
+	}{
+		{"a change that is not documentation-only", func(e *rcEnv) {
+			e.set("compare.json", `{"files":[{"filename":"docs/RESULTS.md","status":"modified"},{"filename":"internal/x/a.go","status":"modified"}]}`)
+		}, true},
+		{"a failing gh", func(e *rcEnv) { e.set("compare.fail", "") }, true},
+		{"a failing changed-files.sh", func(e *rcEnv) {
+			rcWrite(t, filepath.Join(e.repo, "deploy/ops/changed-files.sh"), "#!/bin/sh\necho docs_only=true\nexit 1\n")
+		}, false},
+		{"a gate commit equal to HEAD", func(e *rcEnv) {
+			// The working tree names HEAD itself (a commit cannot name its own hash).
+			rcWrite(t, filepath.Join(e.repo, "docs/RESULTS.md"), rcResults(e.c1, e.head, rcGateRows+rcManualDone, ""))
+		}, false},
+		{"an unknown gate commit", func(e *rcEnv) {
+			rcWrite(t, filepath.Join(e.repo, "docs/RESULTS.md"), rcResults(e.c1, strings.Repeat("e", 40), rcGateRows+rcManualDone, ""))
+		}, false},
+		{"a gate commit that is not an ancestor", func(e *rcEnv) {
+			head := e.head
+			rcGit(t, e.repo, "checkout", "-q", "-b", "side", e.c1)
+			side := e.commit("internal/x/b.go", "package x\n", "side")
+			rcGit(t, e.repo, "checkout", "-q", "main")
+			e.head = head
+			rcWrite(t, filepath.Join(e.repo, "docs/RESULTS.md"), rcResults(e.c1, side, rcGateRows+rcManualDone, ""))
+		}, false},
+		{"a gate of an already tagged release", func(e *rcEnv) {
+			b, _ := os.ReadFile(filepath.Join(e.repo, "docs/RESULTS.md"))
+			rcWrite(t, filepath.Join(e.repo, "docs/RESULTS.md"), strings.Replace(string(b), "- Release: v0.3.0", "- Release: v0.2.0", 1))
+			rcGit(t, e.repo, "commit", "-qam", "earlier gate")
+			e.head = rcGit(t, e.repo, "rev-parse", "HEAD")
+			checked := rcGit(t, e.repo, "rev-parse", "HEAD^")
+			e.runs(rcRun{100, checked, rcFullJobs}, rcRun{101, e.head, rcDocsJobs})
+		}, false},
+	} {
+		t.Run("the full run for "+c.name, func(t *testing.T) {
+			e := newRCEnv(t)
+			e.gateCommit(rcGateRows + rcManualDone)
+			c.setup(e)
+			e.defaults()
+			b, _ := os.ReadFile(filepath.Join(e.stub, "deploy_runs.json"))
+			if !strings.Contains(string(b), e.head) {
+				e.runs(rcRun{100, e.head, rcFullJobs})
+			}
+			lines, _, _ := e.run()
+			if rcHas(lines, "gate:") {
+				t.Fatalf("the short path was taken:\n%s", strings.Join(lines, "\n"))
+			}
+			for _, want := range []string{"item 1: CI of the commit: pass", "item 3: modules: pass", "item 6: Postgres restore: pass", "item 10: result lines: pass"} {
+				if !rcHas(lines, want) {
+					t.Errorf("no line %q:\n%s", want, strings.Join(lines, "\n"))
+				}
+			}
+			if asked := strings.Contains(e.calls(), "/compare/"); asked != c.compare {
+				t.Errorf("changed-files.sh asked gh: %v, want %v:\n%s", asked, c.compare, e.calls())
+			}
+		})
+	}
+
+	for _, c := range []struct {
+		name, rows, want string
+	}{
+		{"an empty row 5", strings.Replace(rcGateRows, "| 5 | not applicable: there is no previous release | d |", "| 5 |  |  |", 1) + rcManualDone, "5(empty)"},
+		{"a missing row 7", strings.Replace(rcGateRows, "| 7 | no change since x | d |\n", "", 1) + rcManualDone, "7(empty)"},
+		{"an M2 row fail", rcGateRows + strings.Replace(rcManualDone, "| M2 | pass |", "| M2 | fail |", 1), "M2(fail)"},
+		{"a row 4 fail", strings.Replace(rcGateRows, "| 4 | pass |", "| 4 | fail |", 1) + rcManualDone, "4(fail)"},
+		{"a row 1 not run", strings.Replace(rcGateRows, "| 1 | pass |", "| 1 | not run: the CI was down; accepted by someone |", 1) + rcManualDone, "1(not pass)"},
+		{"a row 2 no change", strings.Replace(rcGateRows, "| 2 | pass |", "| 2 | no change since x |", 1) + rcManualDone, "2(not pass)"},
+	} {
+		t.Run("the short path is not ready for "+c.name, func(t *testing.T) {
+			e := newRCEnv(t)
+			e.gateCommit(c.rows)
+			lines, results, code := e.run()
+			last := rcLast(lines)
+			if code == 0 || !rcHas(lines, "gate: HEAD ") || !strings.HasPrefix(last, "not ready: the rows of the release gate in docs/RESULTS.md are not filled or are fail: ") || !strings.Contains(last, c.want) {
+				t.Fatalf("exit %d, want not ready naming %s:\n%s", code, c.want, strings.Join(lines, "\n"))
+			}
+			if strings.Count(last, "(") != 1 {
+				t.Errorf("the last line names more rows than %s: %s", c.want, last)
+			}
+			e.noItemAfter2(lines)
+			if n := strings.Count(results, "\n"); n != 2 {
+				t.Errorf("results.md has %d rows, want 2:\n%s", n, results)
+			}
+		})
+	}
 
 	t.Run("the previous image is the newest release tag, or PREV_IMAGE", func(t *testing.T) {
 		e := newRCEnv(t)
